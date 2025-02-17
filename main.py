@@ -131,6 +131,7 @@ async def lifespan(app: FastAPI):
             index_id_map = {}
 
         # Load Faiss Index
+        # --- Load Faiss Index ---
         try:
             print(f"Попытка загрузить индекс FAISS из: {FAISS_INDEX_PATH}")
             if os.path.exists(FAISS_INDEX_PATH):
@@ -152,7 +153,9 @@ async def lifespan(app: FastAPI):
                 print(f"Новый пустой индекс FAISS создан с размерностью {dimension}.")
 
                 # Ensure the directory exists
-                os.makedirs(os.path.dirname(FAISS_INDEX_PATH), exist_ok=True)
+                directory = os.path.dirname(FAISS_INDEX_PATH)
+                if directory:
+                    os.makedirs(directory, exist_ok=True)
 
                 try:
                     faiss.write_index(index, FAISS_INDEX_PATH)
@@ -170,7 +173,6 @@ async def lifespan(app: FastAPI):
             print("Критическая ошибка: Индекс FAISS не был загружен!")
         else:
             print(f"Индекс FAISS успешно инициализирован: {index.ntotal} векторов, размерность {index.d}")
-
         if index is None:  # <-- ADDED
             print("Критическая ошибка: Индекс FAISS не был загружен!")  # <-- ADDED
         else:

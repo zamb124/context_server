@@ -52,14 +52,14 @@ class MultipleFileUploadResponse(BaseModel):
 
 
 # --- Конфигурация ---
-FAISS_INDEX_PATH = "/Users/viktor-shved/PycharmProjects/model_mini/y_faiss_index.bin"
+FAISS_INDEX_PATH = "y_faiss_index.bin"
 DOCUMENT_STORE_PATH = "document_store.json"
 INDEX_ID_MAP_PATH = "index_id_map.json"
 EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
 CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 TOP_K = 10
 MAX_TEXT_LENGTH = 2048  # Увеличиваем длину текста для начала
-HUBSPOT_DATA_FOLDER = "/Users/viktor-shved/PycharmProjects/model_mini/hubspot_company_data"
+HUBSPOT_DATA_FOLDER = "model_mini/hubspot_company_data"
 
 # --- Authorization Token ---
 CHAT_TOKEN = config.CHAT_TOKEN

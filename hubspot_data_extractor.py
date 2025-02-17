@@ -30,6 +30,15 @@ email_map = {
     'hs_email_to_firstname': 'EMAIL TO FIRST NAME',
     'hs_email_to_lastname': 'EMAIL TO LAST NAME',
 }
+deal_map = {
+    'amount': 'AMOUNT',
+    'closedate': 'DEAL CLOSE DATE',
+    'dealname': 'DEAL NAME',
+    'pipeline': 'DEAL PIPELINE',
+    'dealstage': 'DEAL STAGE',
+    'hubspot_owner_id': 'DEAL OWNER ID',
+}
+
 call_map = {
     'hs_timestamp': 'CALL DATETIME',
     'hs_call_body': 'CALL BODY',
@@ -148,7 +157,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Извлекает исчерпывающие данные для одной компании, включая связанные контакты и действия.
         """
         company_properties = ["name", "domain", "industry", "phone", "website", "description", "contacts",
-                              "activites"]  # Добавлено описание
+                              "activites", "deals"]  # Добавлено описание
         # Изменяем вызов fetch_all, чтобы вернуть только одну компанию по ID
         url = f"{self.BASE_URL}/companies/{company_id}"
         params = {"properties": ",".join(company_properties),
@@ -198,6 +207,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         call_ids = company_data.get("associations", {}).get("calls", {}).get("results", [])
         task_ids = company_data.get("associations", {}).get("tasks", {}).get("results", [])
         meeting_ids = company_data.get("associations", {}).get("meetings", {}).get("results", [])
+        deals_ids = company_data.get("associations", {}).get("deals", {}).get("results", [])
 
         # Функция для получения информации об одном объекте по ID
         async def get_activity_by_id(object_type: str, object_id: str, params: dict) -> Optional[Dict[str, Any]]:
@@ -231,6 +241,20 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                     "type": "email",
                     "id": email["id"],
                     "properties": email["properties"]
+                })
+        # Получаем информацию о каждом deal
+        for deal_id in deals_ids:
+            deal = await get_activity_by_id(
+                "deals", deal_id.get("id"),
+                params={
+                    "properties": ",".join([i for i in deal_map.keys()])
+                }
+            )
+            if deal:
+                associated_activities.append({
+                    "type": "deal",
+                    "id": deal["id"],
+                    "properties": deal["properties"]
                 })
 
         # Получаем информацию о каждом звонке
@@ -385,8 +409,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                 continue
 
             # Извлекаем контакты и действия
-            contacts_ids = [i['id'] for i in
-                            company_data.get("associations", {}).get("contacts", {}).get("results", [])]
+            contacts_ids = [i['id'] for i in company_data.get("associations", {}).get("contacts", {}).get("results", [])]
             contacts = await self.get_associated_contacts(contacts_ids)
             activities = await self.get_associated_activities(company_data)
 
@@ -415,7 +438,7 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = None  # Пример ID компании
+            company_id_to_process = "18149319775"  # Пример ID компании
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

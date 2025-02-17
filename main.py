@@ -133,34 +133,43 @@ async def lifespan(app: FastAPI):
         # Load Faiss Index
         try:
             print(f"Попытка загрузить индекс FAISS из: {FAISS_INDEX_PATH}")
-            if os.path.exists(FAISS_INDEX_PATH):  # <-- ADDED
-                print(f"Файл индекса FAISS найден: {FAISS_INDEX_PATH}")  # <-- ADDED
-                try:  # <-- ADDED: Try...except вокруг faiss.read_index
+            if os.path.exists(FAISS_INDEX_PATH):
+                print(f"Файл индекса FAISS найден: {FAISS_INDEX_PATH}")
+                try:
                     index = faiss.read_index(FAISS_INDEX_PATH)
                     print(f"Индекс FAISS успешно загружен из {FAISS_INDEX_PATH}")
                     print(
-                        f"index.this.own(): {index.this.own() if hasattr(index, 'this') and hasattr(index.this, 'own') else 'N/A'}")  # <-- ADDED
-                except Exception as e:  # <-- ADDED
-                    print(f"Ошибка при ЧТЕНИИ индекса FAISS: {e}")  # <-- ADDED
-                    traceback.print_exc()  # <-- ADDED
-                    index = None  # <-- VERY IMPORTANT
+                        f"index.this.own(): {index.this.own() if hasattr(index, 'this') and hasattr(index.this, 'own') else 'N/A'}")
+                except Exception as e:
+                    print(f"Ошибка при ЧТЕНИИ индекса FAISS: {e}")
+                    traceback.print_exc()
+                    index = None
             else:
                 print("Индекс FAISS не найден. Будет создан новый.")
-                dimension = 768  # Убедитесь, что это правильное значение!
-                print(f"Создание нового индекса с размерностью: {dimension}")  # <-- ADDED
+                dimension = 768
+                print(f"Создание нового индекса с размерностью: {dimension}")
                 index = faiss.IndexFlatIP(dimension)
                 print(f"Новый пустой индекс FAISS создан с размерностью {dimension}.")
+
+                # Ensure the directory exists
+                os.makedirs(os.path.dirname(FAISS_INDEX_PATH), exist_ok=True)
+
                 try:
                     faiss.write_index(index, FAISS_INDEX_PATH)
                     print(f"Пустой индекс FAISS успешно сохранен в: {FAISS_INDEX_PATH}")
                 except Exception as e:
                     print(f"Ошибка при создании или сохранении пустого индекса: {e}")
-                    traceback.print_exc()  # <-- ADDED
-                    index = None  # <-- VERY IMPORTANT
+                    traceback.print_exc()
+                    index = None
         except Exception as e:
             print(f"Критическая ошибка при загрузке FAISS индекса: {e}")
-            traceback.print_exc()  # <-- ADDED
-            index = None  # <-- VERY IMPORTANT
+            traceback.print_exc()
+            index = None
+
+        if index is None:
+            print("Критическая ошибка: Индекс FAISS не был загружен!")
+        else:
+            print(f"Индекс FAISS успешно инициализирован: {index.ntotal} векторов, размерность {index.d}")
 
         if index is None:  # <-- ADDED
             print("Критическая ошибка: Индекс FAISS не был загружен!")  # <-- ADDED

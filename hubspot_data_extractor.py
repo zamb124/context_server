@@ -438,7 +438,7 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = "18149319775"  # Пример ID компании
+            company_id_to_process = None
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

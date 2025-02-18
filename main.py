@@ -1,264 +1,114 @@
+# --- Дополнительные библиотеки для работы с файлами ---
+import io
 import json
-import multiprocessing
-import os
-import traceback
-from contextlib import asynccontextmanager
-from typing import List, Optional, Dict
+from typing import List, Dict, Optional, Any
 
-import faiss
-import numpy as np
-import torch
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile, File, Header, status
+import chromadb
+import docx
+import nltk
+import openpyxl
+import pdfplumber
+import uvicorn
+from chromadb.utils import embedding_functions
+from fastapi import FastAPI, HTTPException, Depends, Header, status, UploadFile, File
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer, CrossEncoder
 
 from config import config
 
-
-# --- Загрузка переменных окружения ---
-
-# --- Модели данных ---
-class DocumentBase(BaseModel):
-    text: str
-    label: str  # Метка, к которой относится документ
-
-
-class Query(BaseModel):
-    text: str
-    labels: List[str]  # Список меток, в которых нужно искать
-
-
-class ContextResponse(BaseModel):
-    context: Dict[str, List[str]]  # Контекст, сгруппированный по метке
-
-
-class FileUploadResponse(BaseModel):
-    filename: str
-    label: str
-    unique_name: str  # Уникальное имя документа
-
-
-class MultipleFileUploadResponse(BaseModel):
-    files: List[FileUploadResponse]
-
-
 # --- Конфигурация ---
-FAISS_INDEX_PATH = "y_faiss_index.bin"
-DOCUMENT_STORE_PATH = "document_store.json"
-INDEX_ID_MAP_PATH = "index_id_map.json"
-EMBEDDING_MODEL_NAME = "all-mpnet-base-v2"
-CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-TOP_K = 10
-MAX_TEXT_LENGTH = 2048
-HUBSPOT_DATA_FOLDER = "model_mini/hubspot_company_data"  # Не используется после рефакторинга. Удалите, если точно не нужен.
+CHROMA_DB_PATH = "chroma_db"  # Папка, где будет храниться база данных ChromaDB
+EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"  # ИЗМЕНЕНО
 
 # --- Токен авторизации ---
 CHAT_TOKEN = config.CHAT_TOKEN
 if not CHAT_TOKEN:
     raise ValueError("Не установлена переменная окружения CHAT_TOKEN. Пожалуйста, настройте ее в файле .env.")
 
-# --- Глобальные переменные ---
-index = None
-document_store = {}  # Структура изменена: label: {unique_name: [chunks]}
-index_id_map = {}  # Структура изменена: label: {unique_name_chunk_index : faiss_index_id}
+
+# --- Модели данных ---
+class DocumentBase(BaseModel):
+    id: str  # ID документа
+    text: str
+    label: str  # Обязательный атрибут label
+    metadata: Dict[str, str] = {}  # Добавляем метаданные
 
 
-# --- Внедрение зависимостей ---
-def get_faiss_index():
-    global index
-    return index
+class Query(BaseModel):
+    text: str
+    labels: List[str]  # Обязательный атрибут labels
+    n_results: int = 5
+    where: Optional[Dict[str, Any]] = None  # Фильтры по метаданным
 
 
-def get_document_store():
-    global document_store
-    return document_store
+class ContextResponse(BaseModel):
+    results: List[Dict]
 
 
-def get_index_id_map():
-    global index_id_map
-    return index_id_map
+# --- Инициализация ChromaDB ---
+# Использовать default_embedding_function
+# default_ef = embedding_functions.DefaultEmbeddingFunction()  # УДАЛЕНО
+
+# Использование SentenceTransformerEmbeddingFunction
+sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+    model_name=EMBEDDING_MODEL_NAME)  # ИЗМЕНЕНО
+
+# Создание клиента ChromaDB
+client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 
 
-# --- Утилиты ---
-def preprocess_text(text: str) -> str:
-    """Предварительная обработка текста: обрезка, удаление не-ASCII символов."""
-    text = text.strip()  # Удаляем пробелы в начале и конце
-    return text
+def get_collection(label: str):
+    """Возвращает или создает коллекцию для указанного label."""
+    collection_name = f"label_{label}"  # Имя коллекции на основе label
+    return client.get_or_create_collection(
+        name=collection_name,
+        embedding_function=sentence_transformer_ef,  # используем SentenceTransformer
+    )
 
 
-def chunk_text(text: str, max_length: int = MAX_TEXT_LENGTH) -> List[str]:
-    """Разбивает текст на чанки фиксированной длины."""
-    chunks = []
-    for i in range(0, len(text), max_length):
-        chunks.append(text[i:i + max_length])
+# --- Функция разбиения текста на абзацы ---
+def split_text_into_paragraphs(text: str) -> List[str]:
+    """
+    Разбивает текст на абзацы.
+
+    Args:
+        text: Исходный текст.
+
+    Returns:
+        Список абзацев текста.
+    """
+    paragraphs = text.split("\n\n")  # Разделение по двойным переносам строк (типичный признак абзаца)
+    return [p.strip() for p in paragraphs if p.strip()]  # Убираем пробелы и пустые абзацы
+
+
+# --- Функция разбиения на предложения ---
+def split_paragraph_into_sentences(paragraph: str) -> List[str]:
+    """
+    Разбивает абзац на предложения с использованием nltk.sent_tokenize.
+    """
+    try:
+        nltk.data.find("tokenizers/punkt")
+    except LookupError:
+        nltk.download("punkt")
+    return nltk.sent_tokenize(paragraph)
+
+
+def split_text_semantically(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+    """
+    Разбивает текст на семантические чанки с использованием Langchain.
+    """
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],  # Порядок важен
+        length_function=len,  # Используем стандартную функцию len
+    )
+    chunks = text_splitter.split_text(text)
     return chunks
 
 
-def add_to_faiss_index(embedding: np.ndarray, faiss_index: faiss.Index):
-    """Добавляет одно вложение в индекс FAISS."""
-    faiss.normalize_L2(embedding)
-    faiss_index.add(embedding.reshape(1, -1))  # Убедитесь, что это вектор-строка
-
-
-# --- Lifespan ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global index, document_store, index_id_map
-
-    # --- Фаза запуска ---
-    print("Запуск FastAPI приложения...")
-    try:
-        # Загрузка метаданных
-        try:
-            with open(DOCUMENT_STORE_PATH, "r") as f:
-                document_store = json.load(f)
-                # Рассмотрите возможность преобразования ключей (unique_name_chunk_index) в int, если это необходимо
-                if isinstance(document_store, dict):  # Добавлена проверка
-                    for label, data in document_store.items():
-                        if isinstance(data, dict):
-                            for unique_name, chunks in data.items():
-                                if not isinstance(chunks, list):
-                                    print(
-                                        f"Предупреждение: Части для {unique_name} в метке {label} не являются списком.  Это вызовет проблемы")
-                        else:
-                            print(
-                                f"Предупреждение: Данные для метки {label} не являются словарем.  Это вызовет проблемы")
-
-            with open(INDEX_ID_MAP_PATH, "r") as f:
-                index_id_map = json.load(f)
-
-                if isinstance(index_id_map, dict):
-                    for label, data in index_id_map.items():
-                        if isinstance(data, dict):
-                            for unique_name_chunk_index, faiss_index_id in data.items():
-                                if not isinstance(faiss_index_id, int):
-                                    print(
-                                        f"Предупреждение: ID индекса FAISS для {unique_name_chunk_index} в метке {label} не является целым числом. ПРЕОБРАЗУЕМ!")
-                                    try:
-                                        index_id_map[label][unique_name_chunk_index] = int(faiss_index_id)
-                                    except ValueError:
-                                        print(
-                                            f"ОШИБКА: Не удалось преобразовать ID индекса FAISS '{faiss_index_id}' в целое число!")
-                                        # Рассмотрите возможность выхода из программы здесь, так как данные повреждены
-                                    except TypeError:  # Если faiss_index_id вообще None.
-                                        print(f"ОШИБКА: faiss_index_id имеет неожиданный тип: {type(faiss_index_id)}")
-                                        # Рассмотрите возможность выхода из программы здесь, так как данные повреждены
-                        else:
-                            print(
-                                f"Предупреждение: Данные для метки {label} не являются словарем.  Это вызовет проблемы")
-
-            print("Метаданные (document_store, index_id_map) успешно загружены.")
-        except FileNotFoundError:
-            print("Файлы метаданных не найдены. Будут использованы пустые значения.")
-            document_store = {}
-            index_id_map = {}
-        except Exception as e:
-            print(f"Ошибка при загрузке метаданных: {e}")
-            traceback.print_exc()  # <-- ADDED
-            document_store = {}
-            index_id_map = {}
-
-        # Загрузка индекса FAISS
-        # --- Загрузка индекса FAISS ---
-        try:
-            print(f"Попытка загрузить индекс FAISS из: {FAISS_INDEX_PATH}")
-            if os.path.exists(FAISS_INDEX_PATH):
-                print(f"Файл индекса FAISS найден: {FAISS_INDEX_PATH}")
-                try:
-                    index = faiss.read_index(FAISS_INDEX_PATH)
-                    print(f"Индекс FAISS успешно загружен из {FAISS_INDEX_PATH}")
-                    print(
-                        f"index.this.own(): {index.this.own() if hasattr(index, 'this') and hasattr(index.this, 'own') else 'N/A'}")
-                except Exception as e:
-                    print(f"Ошибка при ЧТЕНИИ индекса FAISS: {e}")
-                    traceback.print_exc()
-                    index = None
-            else:
-                print("Индекс FAISS не найден. Будет создан новый.")
-                dimension = 768
-                print(f"Создание нового индекса с размерностью: {dimension}")
-                index = faiss.IndexFlatIP(dimension)
-                print(f"Новый пустой индекс FAISS создан с размерностью {dimension}.")
-
-                # Убедитесь, что каталог существует
-                directory = os.path.dirname(FAISS_INDEX_PATH)
-                if directory:
-                    os.makedirs(directory, exist_ok=True)
-
-                try:
-                    faiss.write_index(index, FAISS_INDEX_PATH)
-                    print(f"Пустой индекс FAISS успешно сохранен в: {FAISS_INDEX_PATH}")
-                except Exception as e:
-                    print(f"Ошибка при создании или сохранении пустого индекса: {e}")
-                    traceback.print_exc()
-                    index = None
-        except Exception as e:
-            print(f"Критическая ошибка при загрузке FAISS индекса: {e}")
-            traceback.print_exc()
-            index = None
-
-        if index is None:
-            print("Критическая ошибка: Индекс FAISS не был загружен!")
-        else:
-            print(f"Индекс FAISS успешно инициализирован: {index.ntotal} векторов, размерность {index.d}")
-        if index is None:  # <-- ADDED
-            print("Критическая ошибка: Индекс FAISS не был загружен!")  # <-- ADDED
-        else:
-            print(f"Индекс FAISS успешно инициализирован: {index.ntotal} векторов, размерность {index.d}")  # <-- ADDED
-
-        yield  # <- Здесь приложение начинает обрабатывать запросы
-
-        # --- Фаза завершения ---
-        print("Завершение работы FastAPI приложения...")
-        try:
-            print(f"Сохранение индекса FAISS в: {FAISS_INDEX_PATH}")
-            faiss.write_index(index, FAISS_INDEX_PATH)
-            print(f"Индекс FAISS успешно сохранен в: {FAISS_INDEX_PATH}")
-        except Exception as e:
-            print(f"Ошибка при сохранении индекса FAISS: {e}")
-            traceback.print_exc()  # <-- ADDED
-
-        try:
-            with open(DOCUMENT_STORE_PATH, "w") as f:
-                json.dump(document_store, f)
-            with open(INDEX_ID_MAP_PATH, "w") as f:
-                json.dump(index_id_map, f)
-            print("Метаданные (document_store, index_id_map) успешно сохранены.")
-        except Exception as e:
-            print(f"Ошибка при сохранении метаданных: {e}")
-            traceback.print_exc()
-
-
-    except Exception as e:
-        print(f"Общая ошибка при запуске или завершении работы приложения: {e}")
-        traceback.print_exc()
-
-
-# --- Приложение FastAPI ---
-# Установите стратегию разделения памяти
-torch.multiprocessing.set_sharing_strategy('file_system')
-
-# Ограничьте количество потоков (если проблема в многопоточности)
-os.environ["OMP_NUM_THREADS"] = "1"
-
-# Выберите устройство (MPS для M1, CUDA для NVIDIA)
-device = 'mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu'
-print(f"Используемое устройство: {device}")
-
-app = FastAPI(lifespan=lifespan)
-embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
-cross_encoder = CrossEncoder(CROSS_ENCODER_MODEL_NAME)
-
-
-# Определите save_index как асинхронную функцию в области ее вызова
-async def save_index():
-    global index
-    try:
-        print(f"Сохранение индекса FAISS в: {FAISS_INDEX_PATH}")
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        print(f"Индекс FAISS успешно сохранен в: {FAISS_INDEX_PATH}")
-    except Exception as e:
-        print(f"Ошибка при сохранении индекса FAISS: {e}")
+# --- FastAPI App ---
+app = FastAPI()
 
 
 # --- Зависимость для аутентификации по токену ---
@@ -297,217 +147,170 @@ async def verify_token(authorization: Optional[str] = Header(None)):
     return True
 
 
+# --- Функции для извлечения текста из разных форматов файлов ---
+def extract_text_from_pdf(file: io.BytesIO) -> str:
+    """Извлекает текст из PDF-файла."""
+    with pdfplumber.open(file) as pdf:
+        text = ""
+        for page in pdf.pages:
+            text += page.extract_text() or ""  # Добавляем or "" для обработки пустых страниц
+    return text
+
+
+def extract_text_from_txt(file: io.BytesIO) -> str:
+    """Извлекает текст из TXT-файла."""
+    return file.read().decode("utf-8")
+
+
+def extract_text_from_docx(file: io.BytesIO) -> str:
+    """Извлекает текст из DOCX-файла."""
+    doc = docx.Document(file)
+    text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    return text
+
+
+def extract_text_from_json(file: io.BytesIO) -> str:
+    """Извлекает текст из JSON-файла (предполагается, что это просто текстовый JSON)."""
+    try:
+        data = json.load(file)
+        return json.dumps(data, indent=4)  # Форматируем JSON для читаемости
+    except json.JSONDecodeError:
+        raise ValueError("Некорректный JSON формат.")
+
+
+def extract_text_from_xlsx(file: io.BytesIO) -> str:
+    """Извлекает текст из XLSX-файла."""
+    workbook = openpyxl.load_workbook(file)
+    text = ""
+    for sheet in workbook.sheetnames:
+        worksheet = workbook[sheet]
+        for row in worksheet.iter_rows():
+            row_values = [str(cell.value) for cell in row if
+                          cell.value is not None]  # Преобразуем все значения в строки и обрабатываем None
+            text += ", ".join(row_values) + "\n"
+    return text
+
+
 # --- API endpoints ---
-
-@app.get("/ready")  # <--- ADDED
-async def ready():
-    global index
-    if index is None:
-        raise HTTPException(status_code=503, detail="Индекс FAISS не загружен.")
-    return {"status": "ok"}
-
-
-@app.post("/multiple_files/", response_model=MultipleFileUploadResponse, dependencies=[Depends(verify_token)])
-async def upload_multiple_files(
-        background_tasks: BackgroundTasks,
-        label: str,  # Обязательный параметр
-        files: List[UploadFile] = File(...),
-        document_store: dict = Depends(get_document_store),
-        index_id_map: dict = Depends(get_index_id_map),
-        faiss_index: faiss.Index = Depends(get_faiss_index)
+@app.post("/add_document/", dependencies=[Depends(verify_token)])
+async def add_document(
+        file: UploadFile = File(...),
+        label: str = "default",
+        metadata: str = "{}",  # Передаем метаданные как строку JSON
+        document_id: str = None  # Allow specifying the document_id in the query
 ):
-    """Загружает несколько файлов (любого типа) и векторизует их."""
-    if faiss_index is None:
-        raise HTTPException(status_code=503, detail="Индекс FAISS не загружен. Попробуйте позже.")
+    """Добавляет документ в векторное хранилище, извлекая текст из файла.
 
-    global index
+    Args:
+        file: Файл для загрузки (поддерживаются форматы: pdf, txt, docx, json, xlsx).
+        label: Label для документа.
+        metadata: JSON-строка с метаданными.
+        document_id:  Уникальный идентификатор документа (если не указан, будет сгенерирован).
+    """
+    try:
+        file_content = await file.read()
+        file_io = io.BytesIO(file_content)
+        file_type = file.filename.split(".")[-1].lower()
 
-    responses = []
-    for file in files:
+        if file_type == "pdf":
+            text = extract_text_from_pdf(file_io)
+        elif file_type == "txt":
+            text = extract_text_from_txt(file_io)
+        elif file_type == "docx":
+            text = extract_text_from_docx(file_io)
+        elif file_type == "json":
+            text = extract_text_from_json(file_io)
+        elif file_type == "xlsx":
+            text = extract_text_from_xlsx(file_io)
+        else:
+            raise HTTPException(status_code=400, detail="Неподдерживаемый формат файла")
+
+        # Преобразуем метаданные из строки JSON в словарь
         try:
-            content = await file.read()
-            text = content.decode(errors='ignore')  # Обработка ошибок декодирования
-            unique_name = file.filename  # Использовать имя файла в качестве unique_name
+            metadata_dict = json.loads(metadata)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Некорректный формат метаданных JSON")
 
-            text = preprocess_text(text)
-            text_chunks = chunk_text(text)
+        if not document_id:
+            document_id = file.filename  # Используем имя файла как ID по умолчанию, если не указан
 
-            # --- Обновление существующего или создание нового ---
-            if label not in document_store:
-                document_store[label] = {}
+        collection = get_collection(label)
 
-            if unique_name in document_store[label]:
-                # Обновление: Сначала удалите старые вложения из индекса FAISS
+        # Удаляем старые чанки документа, если они есть
+        collection.delete(where={"source_document_id": document_id})
 
-                print(f"Обновление существующего документа: {unique_name} в метке: {label}")
+        chunks = split_text_semantically(text)
+        chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
-                old_chunk_count = len(document_store[label][unique_name])
+        metadatas = []
+        for i in range(len(chunks)):
+            chunk_metadata = metadata_dict.copy()
+            chunk_metadata["source_document_id"] = document_id
+            metadatas.append(chunk_metadata)
 
-                # Удаление старых из FAISS
-                if label in index_id_map and unique_name in index_id_map[label]:
-                    for i in range(old_chunk_count):
-                        unique_name_chunk_index = f"{unique_name}_{i}"
-                        if unique_name_chunk_index in index_id_map[label]:
-                            faiss_index_id = index_id_map[label][unique_name_chunk_index]
+        collection.upsert(
+            documents=chunks,
+            metadatas=metadatas,
+            ids=chunk_ids,
+        )
 
-                            if faiss_index_id >= 0 and faiss_index_id < index.ntotal:
-                                zero_embedding = np.zeros((1, index.d), dtype=np.float32)
+        return {"message": f"Документ {file.filename} успешно обработан и добавлен с label {label} и ID {document_id}."}
 
-                                # **Критическое логирование**
-                                print("-------------------------------------")
-                                print(
-                                    f"Перед index.assign (первый вызов?):")  # Добавлено для дебага. Первый ли это вызов или нет?
-                                print(f"  i: {i}")
-                                print(f"  label: {label}")
-                                print(f"  unique_name: {unique_name}")
-                                print(f"  unique_name_chunk_index: {unique_name_chunk_index}")
-                                print(f"  faiss_index_id: {faiss_index_id}")
-                                print(f"  index.ntotal: {index.ntotal}")
-                                print(f"  Shape of zero_embedding: {zero_embedding.shape}")
-                                print("-------------------------------------")
-
-                                try:
-                                    random_embedding = np.random.rand(1, index.d).astype(np.float32)
-                                    faiss.normalize_L2(random_embedding)
-                                    index.assign(np.array([faiss_index_id], dtype=np.int64), random_embedding)
-                                    print(f"Удален фрагмент {i} с id faiss {faiss_index_id} из индекса.")
-                                except Exception as assign_error:
-                                    print(f"Ошибка при вызове index.assign: {assign_error}")
-                                    traceback.print_exc()
-
-                            else:
-                                print(
-                                    f"Предупреждение: faiss_index_id {faiss_index_id} находится вне диапазона [0, {index.ntotal}).")
-
-                            if label in index_id_map and unique_name_chunk_index in index_id_map[label]:
-                                del index_id_map[label][unique_name_chunk_index]
-                            else:
-                                print(
-                                    f"Предупреждение: unique_name_chunk_index {unique_name_chunk_index} не найден в index_id_map")
-
-                document_store[label][unique_name] = []  # Сброс списка фрагментов
-
-            else:
-                print(f"Создание нового документа: {unique_name} в метке: {label}")
-                document_store[label][unique_name] = []
-
-            # Векторизация и добавление в FAISS
-            for i, chunk in enumerate(text_chunks):
-                embedding = embedding_model.encode(chunk, convert_to_tensor=False)
-                embedding = np.float32(embedding)
-                embedding = embedding.reshape(1, -1)  # Добавляем изменение формы
-                add_to_faiss_index(embedding, faiss_index)  # Использовать вспомогательную функцию
-
-                unique_name_chunk_index = f"{unique_name}_{i}"
-                if label not in index_id_map:
-                    index_id_map[label] = {}
-                if unique_name not in index_id_map[label]:
-                    index_id_map[label][unique_name] = {}
-                index_id_map[label][unique_name_chunk_index] = faiss_index.ntotal - 1  # Правильное присваивание
-
-                document_store[label][unique_name].append(chunk)
-
-            index = faiss_index
-            # index = faiss_index #Не нужно
-            try:
-                await save_index()  # Блокирующий вызов.
-            except Exception as e:
-                print(f"Ошибка при сохранении индекса: {e}")
-                traceback.print_exc()
-
-            responses.append(FileUploadResponse(filename=file.filename, label=label, unique_name=unique_name))
-
-        except Exception as e:
-            traceback.print_exc()
-            responses.append(FileUploadResponse(filename=file.filename, label=label, unique_name=f"Ошибка: {e}"))
-
-    return MultipleFileUploadResponse(files=responses)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/context/", response_model=ContextResponse, dependencies=[Depends(verify_token)])
-async def get_context(query: Query, document_store: dict = Depends(get_document_store),
-                      index_id_map: dict = Depends(get_index_id_map),
-                      faiss_index: faiss.Index = Depends(get_faiss_index)):
-    """Получает контекст."""
-    if faiss_index is None:
-        raise HTTPException(status_code=503, detail="Индекс FAISS не загружен. Попробуйте позже.")
-
-    global index
-
-    query_text = preprocess_text(query.text)  # Предварительная обработка текста запроса
-    query_embedding = embedding_model.encode(query_text, convert_to_tensor=False)
-    query_embedding = np.float32(query_embedding)  # Ensure it's float32
-    query_embedding = query_embedding.reshape(1, -1)
-
-    # Print embedding shape
-    print(f"query_embedding shape: {query_embedding.shape}")
-
-    faiss.normalize_L2(query_embedding)
-
-    D, I = faiss_index.search(query_embedding, TOP_K)
-
-    # Print D and I
-    print(f"Distances (D): {D}")
-    print(f"Indices (I): {I}")
-
-    # Build a dictionary of context documents grouped by label
-    context_documents: Dict[str, List[str]] = {}
-
-    # Initialize context_documents with all labels from index_id_map
-    for label in query.labels:
-        context_documents[label] = []
-
-    for i in range(len(I[0])):
-        faiss_index_val = I[0][i]
-
-        # Add this check:
-        if faiss_index_val < 0 or faiss_index_val >= faiss_index.ntotal:
-            print(f"Внимание: Индекс FAISS {faiss_index_val} вне допустимого диапазона [0, {faiss_index.ntotal}).  Пропускаем.")
-            continue
-
-        for label in query.labels: # Изменено
-            if label in index_id_map: # Добавлено
-                for unique_name_chunk_index, index_val in index_id_map[label].items():  # Добавлено label
-                    if index_val == faiss_index_val:  # Найдено соответствие
-                        unique_name, chunk_index = unique_name_chunk_index.rsplit("_", 1)  # Разделить unique_name_0 обратно на unique_name, 0
-
-                        if label in document_store and unique_name in document_store[label]:
-                            try:
-                                chunk_index_int = int(chunk_index)
-                                if chunk_index_int < len(document_store[label][unique_name]):
-                                    chunk = document_store[label][unique_name][chunk_index_int]
-                                    context_documents[label].append(chunk)
-                                else:
-                                    print(f"Предупреждение: Индекс части {chunk_index} вне диапазона для unique_name {unique_name} в метке {label}.")
-                            except ValueError:
-                                print(f"Предупреждение: Не удалось преобразовать индекс части {chunk_index} в целое число.")
-
-                            break  # Перейдите к следующему результату faiss, нет смысла искать другие метки после того, как индекс совпал.
-
-                        else:
-                            print(f"Предупреждение: unique_name {unique_name} или метка {label} не найдены в document_store.")
-
-    # --- Re-ranking с помощью Cross-Encoder ---
-    ranked_context: Dict[str, List[str]] = {}
-    for label, docs in context_documents.items():
-        if not docs:
-            ranked_context[label] = []  # Пустой список, указывающий на отсутствие документов
-            continue
-
-        # Add query text to CrossEncoder input
-        cross_encoder_input = [[query_text, doc] for doc in docs]
+@app.post("/query/", response_model=ContextResponse, dependencies=[Depends(verify_token)])
+async def query_documents(query: Query):
+    """Выполняет поиск документов в векторном хранилище."""
+    all_results = []
+    for label in query.labels:  # Итерируемся по списку labels
         try:
-            cross_encoder_scores = cross_encoder.predict(cross_encoder_input)
-
-            # Сортируем документы по убыванию scores
-            ranked_documents = [doc for _, doc in sorted(zip(cross_encoder_scores, docs), reverse=True)]
-            ranked_context[label] = ranked_documents
-
+            collection = get_collection(label)  # Получаем коллекцию для label
+            results = collection.query(
+                query_texts=[query.text],
+                n_results=query.n_results,
+                where=query.where  # Фильтры по метаданным
+            )
+            """
+                $eq – оператор "равно". Другие операторы:
+                $ne: Не равно
+                $gt: Больше
+                $gte: Больше или равно
+                $lt: Меньше
+                $lte: Меньше или равно
+                $in: Значение находится в списке значений (например, {"category": {"$in": ["blog", "news"]}})
+                $nin: Значение отсутствует в списке значений
+                $contains: Строка содержит подстроку (например, {"author": {"$contains": "Doe"}})
+                $like: Строка соответствует шаблону SQL-стиля LIKE.
+            """
+            # Добавляем результаты в общий список
+            for i in range(len(results['ids'][0])):
+                all_results.append({
+                    'id': results['ids'][0][i],
+                    'document': results['documents'][0][i],
+                    'metadata': results['metadatas'][0][i],
+                    'distance': results['distances'][0][i] if 'distances' in results else None,  # Добавляем расстояние
+                    'label': label  # Добавляем label
+                })
         except Exception as e:
-            print(f"Ошибка при работе CrossEncoder: {e}")
-            ranked_context[label] = ["Ошибка при перекрестном кодировании."]  # Отметить ошибку
+            print(f"Ошибка при запросе label {label}: {e}")  # Логируем ошибку, но продолжаем
+            # raise HTTPException(status_code=500, detail=str(e)) # Можно и выкидывать исключение, но лучше обработать все label
 
-    return ContextResponse(context=ranked_context)
+    # Возвращаем все результаты, объединенные в один список
+    return ContextResponse(results=all_results)
+
+
+@app.delete("/delete_document/{document_id}/{label}", dependencies=[Depends(verify_token)])
+async def delete_document(document_id: str, label: str):
+    """Удаляет документ или фрагмент документа из векторного хранилища по ID и label."""
+    try:
+        collection = get_collection(label)  # Получаем коллекцию для label
+        # !ВАЖНО: Удаляем все фрагменты, связанные с исходным document_id
+        collection.delete(where={"source_document_id": document_id})
+        return {"message": f"Документ с ID {document_id} и все его фрагменты с label {label} успешно удалены"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
@@ -516,8 +319,4 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    if multiprocessing.get_start_method(allow_none=True) is None:
-        multiprocessing.set_start_method("spawn")
-    import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8001)

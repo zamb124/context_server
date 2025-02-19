@@ -157,7 +157,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Извлекает исчерпывающие данные для одной компании, включая связанные контакты и действия.
         """
         company_properties = ["name", "domain", "industry", "phone", "website", "description", "contacts",
-                              "activites", "deals"]  # Добавлено описание
+                              "activites", "deals", "geography"]  # Добавлено описание
         # Изменяем вызов fetch_all, чтобы вернуть только одну компанию по ID
         url = f"{self.BASE_URL}/companies/{company_id}"
         params = {"properties": ",".join(company_properties),

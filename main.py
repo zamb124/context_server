@@ -302,7 +302,7 @@ async def add_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/query/", response_model=ContextResponse, dependencies=[Depends(verify_token)])
+@app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
 async def query_documents(query: Query):
     """Выполняет поиск документов в векторном хранилище."""
     all_results = []

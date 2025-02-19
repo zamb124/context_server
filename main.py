@@ -773,7 +773,7 @@ async def telegram_message_collector():
                             "company_title": company_title,
                         }
 
-                        conversation_id = f"{chat_title}:{chat_id}:{conversation_message_start_id}"
+                        conversation_id = f"{chat_title}{chat_id}:{conversation_message_start_id}"
 
                         if chat_title not in daily_conversations:
                             daily_conversations[chat_title] = {}

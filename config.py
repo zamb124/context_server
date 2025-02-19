@@ -7,6 +7,8 @@ class Config:
         load_dotenv()
         self.CHAT_TOKEN = os.getenv("CHAT_TOKEN")
         self.HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
+        self.TELEGRAM_BOT_TOKEN= os.getenv("TELEGRAM_BOT_TOKEN")
+
 
 config = Config()
 sessions = {}

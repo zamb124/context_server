@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re  # Импорт модуля для регулярных выражений
+import traceback
 from typing import Optional, Dict, Any, List
 
 import httpx
@@ -13,6 +14,8 @@ def clean_text(text: str) -> str:
     """Удаляет технические символы, такие как \n, \t, \r, HTML теги, а также символ >."""
     text = re.sub(r"[\n\t\r]", " ", text).strip()
     text = re.sub(r"<[^>]+>", "", text)  # Удаление HTML тегов
+    if not text:
+        text = ''
     text = text.replace(">", "")  # Удаление символа >
     return text
 
@@ -37,6 +40,7 @@ deal_map = {
     'pipeline': 'DEAL PIPELINE',
     'dealstage': 'DEAL STAGE',
     'hubspot_owner_id': 'DEAL OWNER ID',
+    'geography': 'DEAL GEOGRAPHY'
 }
 
 call_map = {
@@ -98,12 +102,14 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                     logging.error(f"Непоправимая ошибка: {e}")
                     return None  # Непоправимая ошибка
             except httpx.RequestError as e:
+                logging.error(traceback.format_exc())
                 logging.error(f"Ошибка запроса для URL {url}: {e}")
                 logging.warning(
                     f"Повторная попытка через {self.retry_delay} секунд (попытка {attempt + 1}/{self.max_retries})")
                 await asyncio.sleep(self.retry_delay)
             except Exception as e:
                 logging.error(f"Произошла непредвиденная ошибка: {e}")
+                logging.error(traceback.format_exc())
                 return None  # Непоправимая ошибка
 
         logging.error(f"Не удалось получить данные из {url} после {self.max_retries} попыток.")
@@ -157,7 +163,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Извлекает исчерпывающие данные для одной компании, включая связанные контакты и действия.
         """
         company_properties = ["name", "domain", "industry", "phone", "website", "description", "contacts",
-                              "activites", "deals", "geography"]  # Добавлено описание
+                              "activites", "deals", "geography","country", "city"]  # Добавлено описание
         # Изменяем вызов fetch_all, чтобы вернуть только одну компанию по ID
         url = f"{self.BASE_URL}/companies/{company_id}"
         params = {"properties": ",".join(company_properties),
@@ -191,6 +197,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                 else:
                     logging.warning(f"Контакт с ID {contact_id} не найден.")
             except Exception as e:
+                logging.error(traceback.format_exc())
                 logging.error(f"Ошибка при получении контакта с ID {contact_id}: {e}")
         return contacts
 
@@ -346,11 +353,10 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                                 # При желании удалите временный файл
                                 os.remove(file_path)
                     except Exception as e:
+                        logging.error(traceback.format_exc())
                         logging.error(
                             f"Ошибка обработки документа {attachment_name} из {attachment_url}: {e}")
         return document_texts
-
-
 
     def build_company_text(self, company_data: Dict[str, Any], contacts: List[Dict[str, Any]],
                            activities: List[Dict[str, Any]]) -> str:
@@ -358,17 +364,19 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Создает единый текстовый блок из данных компании, контактов и действий,
         используя разделители для логической структуры.
         """
-
-        text = f"COMPANY: {company_data['properties'].get('name', 'Без названия')}\n"  # Основная информация о компании
+        text = f'metadata=city:{company_data["properties"].get("city", "")};country:{company_data["properties"].get("country", "")};industry:{company_data["properties"].get("industry", "")}\n'
+        text += f"COMPANY: {company_data['properties'].get('name', '')}\n"  # Основная информация о компании
         text += f"ID: {company_data['id']}\n"
-        text += f"DOMAIN: {company_data['properties'].get('domain', 'Нет домена')}\n"
-        text += clean_text(f"DESCRIPTION: {company_data['properties'].get('description', 'Нет описания')}\n")
+        text += f"DOMAIN: {company_data['properties'].get('domain', '')}\n"
+        text += f"CITY: {company_data['properties'].get('city', '')}\n"
+        text += f"COUNTRY: {company_data['properties'].get('country', '')}\n"
+        text += clean_text(f"DESCRIPTION: {company_data['properties'].get('description', '')}\n")
         text += "    \n\n"  # Разделитель между компанией и контактами
 
         text += "CONTACTS:\n"
         for contact in contacts:
             text += f"  CONTACT: {contact['properties'].get('firstname', 'Нет имени')} {contact['properties'].get('lastname', 'Нет фамилии')}\n"
-            text += f"  EMAIL: {contact['properties'].get('jobtitle', 'Нет email')}\n"
+            text += f"  JOB TITLE: {contact['properties'].get('jobtitle', 'Нет email')}\n"
             text += f"  EMAIL: {contact['properties'].get('email', 'Нет email')}\n"
             text += f"  PHONE: {contact['properties'].get('phone', 'Нет телефона')}\n"
             text += "   \n"  # Разделитель между контактами
@@ -409,7 +417,8 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                 continue
 
             # Извлекаем контакты и действия
-            contacts_ids = [i['id'] for i in company_data.get("associations", {}).get("contacts", {}).get("results", [])]
+            contacts_ids = [i['id'] for i in
+                            company_data.get("associations", {}).get("contacts", {}).get("results", [])]
             contacts = await self.get_associated_contacts(contacts_ids)
             activities = await self.get_associated_activities(company_data)
 
@@ -417,7 +426,11 @@ class HubSpotDataExtractor:  # Переименованный класс для 
             company_text = self.build_company_text(company_data, contacts, activities)
 
             # Сохраняем данные в отдельный текстовый файл для каждой компании
-            company_name = company_data['properties'].get('name', 'Без названия').replace('/', '_').replace('\\', '_')
+            try:
+                company_name = company_data['properties'].get('name', 'Без названия').replace('/', '_').replace('\\', '_')
+            except Exception as e:
+                traceback.print_exc()
+                company_name = company_data['properties'].get('name', 'Без названия')
             output_file = os.path.join(self.output_dir, f"{company_name}.txt")
             with open(output_file, "w", encoding="utf-8") as f:
                 f.write(company_text)
@@ -438,10 +451,11 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = '18983060297'
+            company_id_to_process = None
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")
+            logging.error(traceback.format_exc())
         finally:
             await extractor.close()
 

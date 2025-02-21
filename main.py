@@ -19,8 +19,7 @@ from config import config  # Убедитесь, что config.py содержи
 from file_utils import extract_text_from_pdf, extract_text_from_txt, extract_text_from_docx, \
     extract_text_from_json, extract_text_from_xlsx
 # Import the new module
-from telegram_integration import telegram_integration
-from text_utils import split_text_semantically
+from telegram_integration import telegram_integration, BaseMetadata
 
 # --- Конфигурация ---
 CHROMA_DB_PATH = "chroma_db"  # Папка, где будет храниться база данных ChromaDB
@@ -42,40 +41,16 @@ logging.basicConfig(level=logging.INFO,
 
 
 # --- Модели данных ---
-# --- Модели данных ---
-class DocumentBase(BaseModel):
+class DocumentBase(BaseMetadata):
     id: str
     text: str
     label: str
-    metadata: Dict[str, Any]
 
     @validator('label')
     def label_must_be_valid(cls, v):
         valid_labels = ['hubspot', 'telegram', 'wiki', 'startrek']
         if v not in valid_labels:
             raise ValueError(f"Недопустимый label. Допустимые значения: {valid_labels}")
-        return v
-
-    @validator('metadata')
-    def metadata_must_be_complete(cls, v):
-        required_fields = ['тип', 'автор', 'partner', 'chunk', 'category', 'country']
-        for field in required_fields:
-            if field not in v:
-                raise ValueError(f"В metadata отсутствует обязательное поле: {field}")
-
-        # Дополнительные проверки типов
-        if not isinstance(v['тип'], str):
-            raise ValueError("Поле 'тип' должно быть строкой")
-        if not isinstance(v['автор'], dict) or 'username' not in v['автор'] or 'first_name' not in v['автор']:
-            raise ValueError("Поле 'автор' должно быть словарем с ключами 'username' и 'first_name'")
-        if not isinstance(v['partner'], (str, bool)) and v['partner'] is not False:  # Разрешаем False
-            raise ValueError("Поле 'partner' должно быть строкой (id партнера) или False")
-        if not isinstance(v['chunk'], bool):
-            raise ValueError("Поле 'chunk' должно быть булевым значением")
-        if not isinstance(v['category'], str):
-            raise ValueError("Поле 'category' должно быть строкой")
-        if not isinstance(v['country'], (str, bool)) and v['country'] is not False:  # Разрешаем False
-            raise ValueError("Поле 'country' должно быть строкой (код страны) или False")
         return v
 
 
@@ -173,7 +148,13 @@ async def add_document(
             metadata_dict = json.loads(metadata)
             # Валидация через Pydantic Model
             DocumentBase(id=document_id or file.filename, text="", label=label,
-                         metadata=metadata_dict)  # Создаем объект для валидации. text не важно, тк используется для валидации metadata
+                         type=metadata_dict.get('type'),  # Обязательные поля из BaseMetadata
+                         author=metadata_dict.get('author'),
+                         partner=metadata_dict.get('partner', False),
+                         chunk=metadata_dict.get('chunk', True),
+                         category=metadata_dict.get('category', 'sales'),
+                         country=metadata_dict.get('country', False)
+                         )  # Создаем объект для валидации. text не важно, тк используется для валидации metadata
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Некорректный формат метаданных JSON")
         except ValueError as e:

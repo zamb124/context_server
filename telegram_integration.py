@@ -1,3 +1,5 @@
+# telegram_integration.py
+
 import asyncio
 import json
 import logging
@@ -26,19 +28,8 @@ daily_conversations: Dict[str, Dict[str, Dict[str, Dict]]] = {}
 deal_cache = {}  # Initialize the deal cache
 
 
-class ValidatedTelegramMetadata(BaseModel):
-    source: str
-    chat: str
-    chat_id: str
-    origin_conversation_id: str
-    date: str
-    author_username: Optional[str]
-    author_first_name: Optional[str]
-    deal_id: Optional[str]
-    deal_title: Optional[str]
-    company_id: Optional[str]
-    company_title: Optional[str]
-    type: str = "telegramm_message"
+class BaseMetadata(BaseModel):
+    type: str
     author: Dict[str, str]
     partner: bool = False  # default = False
     chunk: bool = True  # default = True
@@ -50,6 +41,20 @@ class ValidatedTelegramMetadata(BaseModel):
         if not isinstance(v, dict) or 'username' not in v or 'first_name' not in v:
             raise ValueError("Поле 'author' должно быть словарем с ключами 'username' и 'first_name'")
         return v
+
+
+class ValidatedTelegramMetadata(BaseMetadata):
+    source: str
+    chat: str
+    chat_id: str
+    origin_conversation_id: str
+    date: str
+    author_username: Optional[str]
+    author_first_name: Optional[str]
+    deal_id: Optional[str]
+    deal_title: Optional[str]
+    company_id: Optional[str]
+    company_title: Optional[str]
 
     @validator('source')
     def source_must_be_valid(cls, v):

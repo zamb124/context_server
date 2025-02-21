@@ -38,17 +38,17 @@ class ValidatedTelegramMetadata(BaseModel):
     deal_title: Optional[str]
     company_id: Optional[str]
     company_title: Optional[str]
-    тип: str = "телеграмм сообщение"
-    автор: Dict[str, str]
+    type: str = "telegramm_message"
+    author: Dict[str, str]
     partner: bool = False  # default = False
     chunk: bool = True  # default = True
     category: str = "sales"  # default = sales
     country: bool = False  # default = False
 
-    @validator('автор')
+    @validator('author')
     def author_must_have_required_fields(cls, v):
         if not isinstance(v, dict) or 'username' not in v or 'first_name' not in v:
-            raise ValueError("Поле 'автор' должно быть словарем с ключами 'username' и 'first_name'")
+            raise ValueError("Поле 'author' должно быть словарем с ключами 'username' и 'first_name'")
         return v
 
     @validator('source')
@@ -258,8 +258,8 @@ class TelegramIntegration:
                                 "deal_title": conversation.get("deal_title"),
                                 "company_id": conversation.get("company_id"),
                                 "company_title": conversation.get("company_title"),
-                                "тип": "телеграмм сообщение",  # Обязательное поле
-                                "автор": author_info,  # Обязательное поле
+                                "type": "telegramm_message",  # Обязательное поле
+                                "author": author_info,  # Обязательное поле
                                 "partner": False,  # Обязательное поле, значение по умолчанию
                                 "chunk": True,  # Обязательное поле, значение по умолчанию
                                 "category": "sales",  # Обязательное поле, значение по умолчанию

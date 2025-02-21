@@ -28,8 +28,6 @@ daily_conversations: Dict[str, Dict[str, Dict[str, Dict]]] = {}
 deal_cache = {}  # Initialize the deal cache
 
 
-
-
 class TelegramIntegration:
     def __init__(self):
         self.is_running = False

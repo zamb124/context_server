@@ -411,6 +411,20 @@ class HubSpotDataExtractor:  # Переименованный класс для 
 
         for company in companies:
             company_id = company["id"]
+
+            # Проверяем, существует ли файл для этой компании
+            try:
+                company_name = company['properties'].get('name', 'Без названия').replace('/', '_').replace('\\', '_')
+            except Exception as e:
+                traceback.print_exc()
+                company_name = company['properties'].get('name', 'Без названия')
+            output_file = os.path.join(self.output_dir, f"{company_name}.txt")
+
+
+            if os.path.exists(output_file):
+                logging.info(f"Файл для компании {company_name} ({company_id}) уже существует. Пропускаем.")
+                continue
+
             company_data = await self.get_company_data(company_id)
 
             if not company_data:
@@ -425,6 +439,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
 
             # Создаем текстовый блок для компании
             company_text = self.build_company_text(company_data, contacts, activities)
+
 
             # Сохраняем данные в отдельный текстовый файл для каждой компании
             try:
@@ -452,7 +467,7 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = '18149319775'
+            company_id_to_process = None
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

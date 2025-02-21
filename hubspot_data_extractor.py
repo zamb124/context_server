@@ -24,6 +24,7 @@ note_map = {
     'hs_note_body': 'NOTE BODY'
 }
 email_map = {
+    'hs_timestamp': 'EMAIL DATETIME',
     'hs_email_text': 'EMAIL TEXT',
     'hs_email_subject': 'EMAIL SUBJECT',
     'hs_email_from_email': 'EMAIL FROM',
@@ -451,7 +452,7 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = None
+            company_id_to_process = '18149319775'
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

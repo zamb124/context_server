@@ -8,23 +8,24 @@ import signal
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from typing import List, Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Header, status, UploadFile, File
-from pydantic import BaseModel, validator
+from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request
 
 from chromadb_utils import get_collection
 from config import config  # Убедитесь, что config.py содержит CHAT_TOKEN и TELEGRAM_BOT_TOKEN
 from file_utils import extract_text_from_pdf, extract_text_from_txt, extract_text_from_docx, \
     extract_text_from_json, extract_text_from_xlsx
+from models import ValidLabels, DocumentBase, Query, ContextResponse, ForceSaveResponse
 # Import the new module
-from telegram_integration import telegram_integration, BaseMetadata
+from telegram_integration import telegram_integration
+from text_utils import split_text_semantically
 
 # --- Конфигурация ---
 CHROMA_DB_PATH = "chroma_db"  # Папка, где будет храниться база данных ChromaDB
 TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
-SAVE_INTERVAL_SECONDS = 600  # Интервал сохранения в секундах (10 минут)
+SAVE_INTERVAL_SECONDS = 69  # Интервал сохранения в секундах (10 минут)
 
 # --- Токен авторизации ---
 CHAT_TOKEN = config.CHAT_TOKEN
@@ -38,35 +39,6 @@ if not TELEGRAM_BOT_TOKEN:
 # --- Инициализация логирования ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-# --- Модели данных ---
-class DocumentBase(BaseMetadata):
-    id: str
-    text: str
-    label: str
-
-    @validator('label')
-    def label_must_be_valid(cls, v):
-        valid_labels = ['hubspot', 'telegram', 'wiki', 'startrek']
-        if v not in valid_labels:
-            raise ValueError(f"Недопустимый label. Допустимые значения: {valid_labels}")
-        return v
-
-
-class Query(BaseModel):
-    text: str
-    labels: List[str]  # Обязательный атрибут labels
-    n_results: int = 5
-    where: Optional[Dict[str, Any]] = None  # Фильтры по метаданным
-
-
-class ContextResponse(BaseModel):
-    results: List[Dict]
-
-
-class ForceSaveResponse(BaseModel):
-    message: str
 
 
 # --- FastAPI App ---
@@ -121,44 +93,53 @@ async def verify_token(authorization: Optional[str] = Header(None)):
     return True
 
 
-# --- API endpoints ---
+def extract_metadata_from_query_params(request: Request) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Extracts metadata from query parameters, separating core metadata from extra attributes.
+    """
+    query_params = request.query_params
+    metadata = {}
+    extra_attributes = {}
+
+    # Core metadata parameters
+    core_metadata_keys = ["type", "author", "partner", "chunk", "category", "country"]
+
+    for key, value in query_params.items():
+        if key in core_metadata_keys:
+            # Convert string boolean values to boolean type
+            if value.lower() == 'true':
+                value = True
+            elif value.lower() == 'false':
+                value = False
+
+            metadata[key] = value
+        elif key not in ["label", "document_id"]:  # Exclude label and document_id
+            extra_attributes[key] = value
+
+    return metadata, extra_attributes
+
+
+from fastapi import Depends
+
+
 @app.post("/add_document/", dependencies=[Depends(verify_token)])
 async def add_document(
         file: UploadFile = File(...),
-        label: str = "default",
-        metadata: str = "{}",
-        document_id: str = None
+        label: ValidLabels = FastAPIQuery(
+            description="Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле."),
+        document_id: Optional[str] = FastAPIQuery(
+            description="Уникальный идентификатор документа. Если не указан, используется имя файла."),
+        metadata: DocumentBase = Depends()  # Используем Depends для валидации и отображения в Swagger
 ):
     """
         Добавляет документ в векторное хранилище.
 
         - **file**: Загружаемый файл.
         - **label**: Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле.
-        - **metadata**: JSON строка с метаданными документа. Обязательная информация:
-            - **тип**: Тип документа (телеграмм сообщение, hubspot_profile, tracker_ticket, ticket_comment, user_manual).
-            - **автор**: Словарь с username и first_name.
-            - **partner**: ID партнера или False, если документ не относится к партнеру.
-            - **chunk**: Разбивать ли на чанки документ (True/False), по умолчанию True.
-            - **category**: Категория документов (partner, sales, ops, product).
-            - **country**: Код страны или False, если документ не относится к стране.
         - **document_id**: Уникальный идентификатор документа. Если не указан, используется имя файла.
-        """
+        - **metadata**: Метаданные документа.
+    """
     try:
-        try:
-            metadata_dict = json.loads(metadata)
-            # Валидация через Pydantic Model
-            DocumentBase(id=document_id or file.filename, text="", label=label,
-                         type=metadata_dict.get('type'),  # Обязательные поля из BaseMetadata
-                         author=metadata_dict.get('author'),
-                         partner=metadata_dict.get('partner', False),
-                         chunk=metadata_dict.get('chunk', True),
-                         category=metadata_dict.get('category', 'sales'),
-                         country=metadata_dict.get('country', False)
-                         )  # Создаем объект для валидации. text не важно, тк используется для валидации metadata
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Некорректный формат метаданных JSON")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
         file_content = await file.read()
         file_io = io.BytesIO(file_content)
         file_type = file.filename.split(".")[-1].lower()
@@ -175,31 +156,21 @@ async def add_document(
             text = extract_text_from_xlsx(file_io)
         else:
             raise HTTPException(status_code=400, detail="Неподдерживаемый формат файла")
-
-        try:
-            metadata_dict = json.loads(metadata)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Некорректный формат метаданных JSON")
-
-        if not document_id:
-            document_id = file.filename
+        document_id = document_id or file.filename
 
         collection = get_collection(label)
-
         # Удаляем старые чанки документа, если они есть
         collection.delete(where={"source_document_id": document_id})
-
-        if metadata_dict.get("chunk", True):  # По умолчанию разбиваем на чанки, если не указано "chunk": false
+        if metadata.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false
             # Разбиваем на чанки
             chunks = split_text_semantically(text)
             chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
             metadatas = []
             for i in range(len(chunks)):
-                chunk_metadata = metadata_dict.copy()
+                chunk_metadata = json.loads(metadata.model_dump_json())
                 chunk_metadata["source_document_id"] = document_id
                 metadatas.append(chunk_metadata)
-
             collection.upsert(
                 documents=chunks,
                 metadatas=metadatas,
@@ -207,16 +178,17 @@ async def add_document(
             )
         else:
             # Сохраняем файл целиком
-            metadata_dict["source_document_id"] = document_id  # Добавляем source_document_id
+            metadata.source_document_id = document_id  # Добавляем source_document_id
             collection.upsert(
                 documents=[text],
-                metadatas=[metadata_dict],
+                metadatas=[json.loads(metadata.model_dump_json())],
                 ids=[document_id],
             )
 
         return {"message": f"Документ {file.filename} успешно обработан и добавлен с label {label} и ID {document_id}."}
 
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -226,7 +198,7 @@ async def query_documents(query: Query):
     all_results = []
     for label in query.labels:  # Итерируемся по списку labels
         try:
-            collection = get_collection(label)  # Получаем коллекцию для label
+            collection = get_collection(label.value)  # Получаем коллекцию для label
             results = collection.query(
                 query_texts=[query.text],
                 n_results=query.n_results,

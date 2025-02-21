@@ -13,13 +13,13 @@ from typing import List, Dict, Optional
 import aiofiles
 import certifi
 import httpx
-from pydantic import validator, BaseModel
 
 from chromadb_utils import get_collection
 from config import config
+from models import ValidatedTelegramMetadata
 
 TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
-SAVE_INTERVAL_SECONDS = 20  # Интервал сохранения в секундах (10 минут)
+SAVE_INTERVAL_SECONDS = 60  # Интервал сохранения в секундах (10 минут)
 OFFSET_FILE = "offset.txt"
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 HUBSPOT_API_KEY = config.HUBSPOT_API_KEY
@@ -28,75 +28,6 @@ daily_conversations: Dict[str, Dict[str, Dict[str, Dict]]] = {}
 deal_cache = {}  # Initialize the deal cache
 
 
-class BaseMetadata(BaseModel):
-    type: str
-    author: Dict[str, str]
-    partner: bool = False  # default = False
-    chunk: bool = True  # default = True
-    category: str = "sales"  # default = sales
-    country: bool = False  # default = False
-
-    @validator('author')
-    def author_must_have_required_fields(cls, v):
-        if not isinstance(v, dict) or 'username' not in v or 'first_name' not in v:
-            raise ValueError("Поле 'author' должно быть словарем с ключами 'username' и 'first_name'")
-        return v
-
-
-class ValidatedTelegramMetadata(BaseMetadata):
-    source: str
-    chat: str
-    chat_id: str
-    origin_conversation_id: str
-    date: str
-    author_username: Optional[str]
-    author_first_name: Optional[str]
-    deal_id: Optional[str]
-    deal_title: Optional[str]
-    company_id: Optional[str]
-    company_title: Optional[str]
-
-    @validator('source')
-    def source_must_be_valid(cls, v):
-        if v != "telegram":
-            raise ValueError("Source должен быть 'telegram'")
-        return v
-
-    @validator('category')
-    def category_must_be_valid(cls, v):
-        valid_categories = ['partner', 'sales', 'ops', 'product']
-        if v not in valid_categories:
-            raise ValueError(f"Недопустимая категория. Допустимые значения: {valid_categories}")
-        return v
-
-    @validator('partner')
-    def partner_must_be_bool(cls, v):
-        if not isinstance(v, bool):
-            raise ValueError("Поле 'partner' должно быть булевым значением")
-        return v
-
-    @validator('country')
-    def country_must_be_bool(cls, v):
-        if not isinstance(v, bool):
-            raise ValueError("Поле 'country' должно быть булевым значением")
-        return v
-
-    @validator('chunk')
-    def chunk_must_be_bool(cls, v):
-        if not isinstance(v, bool):
-            raise ValueError("Поле 'chunk' должно быть булевым значением")
-        return v
-
-    @validator('deal_id', 'deal_title', 'company_id', 'company_title', pre=True, allow_reuse=True)
-    def empty_string_to_none(cls, v):
-        return v if v else None
-
-    @validator('deal_id', 'deal_title', 'company_id', 'company_title', pre=True, allow_reuse=True)
-    def check_deal_and_company_fields(cls, deal_id, values, **kwargs):
-        if deal_id and not all(values.get(field) for field in ['deal_title', 'company_id', 'company_title']):
-            raise ValueError(
-                "Если deal_id указан, то deal_title, company_id и company_title также должны быть указаны.")
-        return deal_id
 
 
 class TelegramIntegration:
@@ -245,36 +176,26 @@ class TelegramIntegration:
                                     logging.error(f"Ошибка при проверке ID {document_id}:{check_error}")
                                     traceback.print_exc()
                                     break  # Прерываем цикл, чтобы избежать бесконечного повторения
-                                    # Создаем словарь для автора
-                            author_info = {
-                                "username": conversation.get("author", {}).get("username"),
-                                "first_name": conversation.get("author", {}).get("first_name")
-                            }
                             # Создаем словарь для метаданных
                             metadata_dict = {
-                                "source": "telegram",
                                 "chat": chat_title,
                                 "chat_id": conversation_id.split(":")[-2],
                                 "origin_conversation_id": conversation_id,
                                 "date": date_str,
-                                "author_username": conversation.get("author", {}).get("username"),
-                                "author_first_name": conversation.get("author", {}).get("first_name"),
+                                "author": conversation.get("author", {}).get("username"),
                                 "deal_id": conversation.get("deal_id"),
                                 "deal_title": conversation.get("deal_title"),
-                                "company_id": conversation.get("company_id"),
-                                "company_title": conversation.get("company_title"),
-                                "type": "telegramm_message",  # Обязательное поле
-                                "author": author_info,  # Обязательное поле
-                                "partner": False,  # Обязательное поле, значение по умолчанию
+                                "company_id": conversation.get("company_id", ''),
+                                "partner": conversation.get("partner", ''),
                                 "chunk": True,  # Обязательное поле, значение по умолчанию
                                 "category": "sales",  # Обязательное поле, значение по умолчанию
-                                "country": False  # Обязательное поле, значение по умолчанию
+                                "country": ''  # Обязательное поле, значение по умолчанию
                             }
                             # Валидируем метаданные с помощью Pydantic Model
-                            validated_metadata = ValidatedTelegramMetadata(**metadata_dict).dict()
+                            validated_metadata = ValidatedTelegramMetadata(**metadata_dict)
                             collection.upsert(
                                 documents=[combined_text],
-                                metadatas=[validated_metadata],
+                                metadatas=[json.loads(validated_metadata.model_dump_json())],
                                 ids=[document_id]
                             )
                             logging.info(
@@ -462,7 +383,7 @@ class TelegramIntegration:
 
                             deal_title = None
                             company_id = None
-                            company_title = None
+                            partner = None
 
                             # Enrich message with deal and company information
                             if deal_id:
@@ -470,7 +391,7 @@ class TelegramIntegration:
                                     deal_data = deal_cache[deal_id]  # Get from cache
                                     deal_title = deal_data.get("deal_title")
                                     company_id = deal_data.get("company_id")
-                                    company_title = deal_data.get("company_title")
+                                    partner = deal_data.get("company_title")
                                 else:
                                     deal_data = await self.get_deal_from_hubspot(deal_id)
                                     if deal_data:
@@ -481,13 +402,13 @@ class TelegramIntegration:
                                             company_id = company_ids[0]  # Assuming one company for deal
                                             company_data = await self.get_company_from_hubspot(company_id)
                                             if company_data:
-                                                company_title = company_data["properties"].get("name")
+                                                partner = company_data["properties"].get("name")
 
                                         # Store in cache
                                         deal_cache[deal_id] = {
                                             "deal_title": deal_title,
                                             "company_id": company_id,
-                                            "company_title": company_title
+                                            "partner": partner
                                         }
 
                             if text:
@@ -507,7 +428,7 @@ class TelegramIntegration:
                                             "deal_id": deal_id,
                                             "deal_title": deal_title,
                                             "company_id": company_id,
-                                            "company_title": company_title
+                                            "partner": partner
                                         }
                                     )
 

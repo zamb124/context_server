@@ -11,7 +11,7 @@ from typing import List, Dict, Optional
 import aiofiles
 import certifi
 import httpx
-from pydantic import validator
+from pydantic import validator, BaseModel
 
 from chromadb_utils import get_collection
 from config import config

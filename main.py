@@ -159,7 +159,7 @@ async def add_document(
             raise HTTPException(status_code=400, detail="Неподдерживаемый формат файла")
         document_id = document_id or file.filename
 
-        collection = get_collection(label)
+        collection = get_collection(label.value)
         # Удаляем старые чанки документа, если они есть
         collection.delete(where={"source_document_id": document_id})
         if metadata.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false

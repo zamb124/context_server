@@ -1,3 +1,5 @@
+import asyncio
+import functools
 from typing import List
 
 import nltk
@@ -16,9 +18,20 @@ def split_paragraph_into_sentences(paragraph: str) -> List[str]:
     return nltk.sent_tokenize(paragraph)
 
 
-def split_text_semantically(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+# Определите вспомогательную функцию run_sync для оборачивания синхронных функций
+def run_sync(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+
+    return wrapper
+
+
+# Создайте синхронную версию split_text_semantically
+def split_text_semantically_sync(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
     """
-    Разбивает текст на семантические чанки с использованием Langchain.
+    Синхронная версия для разбиения текста на семантические чанки с использованием Langchain.
     """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
@@ -28,3 +41,11 @@ def split_text_semantically(text: str, chunk_size: int = 500, chunk_overlap: int
     )
     chunks = text_splitter.split_text(text)
     return chunks
+
+
+# Оберните вызов split_text_semantically в asyncio.to_thread
+async def split_text_semantically(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+    """
+    Асинхронно разбивает текст на семантические чанки с использованием Langchain.
+    """
+    return await asyncio.to_thread(split_text_semantically_sync, text, chunk_size, chunk_overlap)

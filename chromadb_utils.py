@@ -1,3 +1,5 @@
+import asyncio
+
 import chromadb
 from chromadb.utils import embedding_functions
 
@@ -18,3 +20,7 @@ def get_collection(label: str):
         name=collection_name,
         embedding_function=sentence_transformer_ef,  # используем SentenceTransformer
     )
+
+
+async def upsert_to_collection(collection, documents, metadatas, ids):
+    await asyncio.to_thread(collection.upsert, documents=documents, metadatas=metadatas, ids=ids)

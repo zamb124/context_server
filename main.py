@@ -13,7 +13,7 @@ from typing import Dict, Optional, Any, Tuple
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request
 
-from chromadb_utils import get_collection
+from chromadb_utils import get_collection, upsert_to_collection
 from config import config  # Убедитесь, что config.py содержит CHAT_TOKEN и TELEGRAM_BOT_TOKEN
 from file_utils import extract_text_from_pdf, extract_text_from_txt, extract_text_from_docx, \
     extract_text_from_json, extract_text_from_xlsx
@@ -146,15 +146,15 @@ async def add_document(
         file_type = file.filename.split(".")[-1].lower()
 
         if file_type == "pdf":
-            text = extract_text_from_pdf(file_io)
+            text = await extract_text_from_pdf(file_io)
         elif file_type == "txt":
-            text = extract_text_from_txt(file_io)
+            text = await extract_text_from_txt(file_io)
         elif file_type == "docx":
-            text = extract_text_from_docx(file_io)
+            text = await extract_text_from_docx(file_io)
         elif file_type == "json":
-            text = extract_text_from_json(file_io)
+            text = await extract_text_from_json(file_io)
         elif file_type == "xlsx":
-            text = extract_text_from_xlsx(file_io)
+            text = await extract_text_from_xlsx(file_io)
         else:
             raise HTTPException(status_code=400, detail="Неподдерживаемый формат файла")
         document_id = document_id or file.filename
@@ -164,7 +164,7 @@ async def add_document(
         collection.delete(where={"source_document_id": document_id})
         if metadata.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false
             # Разбиваем на чанки
-            chunks = split_text_semantically(text)
+            chunks = await split_text_semantically(text)
             chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
             metadatas = []
@@ -172,19 +172,11 @@ async def add_document(
                 chunk_metadata = json.loads(metadata.model_dump_json())
                 chunk_metadata["source_document_id"] = document_id
                 metadatas.append(chunk_metadata)
-            collection.upsert(
-                documents=chunks,
-                metadatas=metadatas,
-                ids=chunk_ids,
-            )
+            await upsert_to_collection(collection, chunks, metadatas, chunk_ids)
         else:
             # Сохраняем файл целиком
             metadata.source_document_id = document_id  # Добавляем source_document_id
-            collection.upsert(
-                documents=[text],
-                metadatas=[json.loads(metadata.model_dump_json())],
-                ids=[document_id],
-            )
+            await upsert_to_collection(collection, [text], [json.loads(metadata.model_dump_json())], [document_id])
 
         return {"message": f"Документ {file.filename} успешно обработан и добавлен с label {label} и ID {document_id}."}
 

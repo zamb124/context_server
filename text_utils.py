@@ -44,7 +44,7 @@ def split_text_semantically_sync(text: str, chunk_size: int = 5000, chunk_overla
 
 
 # Оберните вызов split_text_semantically в asyncio.to_thread
-async def split_text_semantically(text: str, chunk_size: int = 5000, chunk_overlap: int = 500) -> List[str]:
+async def split_text_semantically(text: str, chunk_size: int = 3000, chunk_overlap: int = 800) -> List[str]:
     """
     Асинхронно разбивает текст на семантические чанки с использованием Langchain.
     """

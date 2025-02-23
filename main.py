@@ -5,12 +5,14 @@ import io
 import json
 import logging
 import signal
+import sqlite3
 import sys
 import traceback
 from contextlib import asynccontextmanager
 from typing import Dict, Optional, Any, Tuple, List
-
+from chromadb_utils import client
 import uvicorn
+from chromadb import PersistentClient
 from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request
 
 from chromadb_utils import get_collection, upsert_to_collection
@@ -284,6 +286,51 @@ async def force_save_messages():
     """
     message = await telegram_integration.save_telegram_messages_to_chromadb()
     return ForceSaveResponse(message=message)
+
+
+def get_db_connection():
+    conn = sqlite3.connect(f'{CHROMA_DB_PATH}/chroma.sqlite3')
+    conn.row_factory = sqlite3.Row
+    return conn
+# Определите функцию для получения уникальных партнеров прямо из базы данных
+def find_partner_strings(search_string):
+    """
+    Ищет вхождения строки в столбце string_value таблицы embedding_metadata,
+    где key = 'partner', без учета регистра.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = """
+    SELECT DISTINCT string_value
+    FROM embedding_metadata
+    WHERE key = 'partner'
+      AND lower(string_value) LIKE lower(?)
+    """
+
+    cursor.execute(query, ('%' + search_string + '%',))  # Используем параметризацию для безопасности
+
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+@app.get("/unique_partners/{label}", dependencies=[Depends(verify_token)])
+async def endpoint_get_unique_partners(label: ValidLabels, prefix: Optional[str] = None):
+    """
+    Возвращает список уникальных значений поля "partner" из метаданных документов указанной коллекции (label),
+    используя прямой SQL-запрос к таблице embedding_metadata.
+    Можно указать префикс для фильтрации значений.
+    """
+    try:
+        partners = find_partner_strings(prefix)
+        return {"partners": partners}
+    except Exception as e:
+        #  Обработайте исключения, например, логирование и возврат ошибки
+        print(f"Ошибка при выполнении запроса к базе данных: {e}")
+        return {"error": "Произошла ошибка при получении партнеров"} # Верните более информативное сообщение об ошибке
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Signal Handling and atexit ---

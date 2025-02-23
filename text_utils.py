@@ -29,7 +29,7 @@ def run_sync(func):
 
 
 # Создайте синхронную версию split_text_semantically
-def split_text_semantically_sync(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+def split_text_semantically_sync(text: str, chunk_size: int = 5000, chunk_overlap: int = 500) -> List[str]:
     """
     Синхронная версия для разбиения текста на семантические чанки с использованием Langchain.
     """
@@ -44,7 +44,7 @@ def split_text_semantically_sync(text: str, chunk_size: int = 500, chunk_overlap
 
 
 # Оберните вызов split_text_semantically в asyncio.to_thread
-async def split_text_semantically(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
+async def split_text_semantically(text: str, chunk_size: int = 5000, chunk_overlap: int = 500) -> List[str]:
     """
     Асинхронно разбивает текст на семантические чанки с использованием Langchain.
     """

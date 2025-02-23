@@ -35,7 +35,7 @@ class BaseMetadata(BaseModel):
             country = pycountry.countries.lookup(v)
             return country.alpha_2  # Возвращаем ISO 3166-1 alpha-2 код страны
         except LookupError:
-            raise ValueError(f"Неверное название страны: {v}")
+            country = v
 
 
 class ValidatedTelegramMetadata(BaseMetadata):

@@ -54,12 +54,14 @@ def process_file(filepath):
     metadata["partner"] = filename
 
     final_metadata = {
-        "category": "partner",
-        "city": metadata.get("city", ""),
-        "country": metadata.get("country", ""),
-        "industry": metadata.get("industry", ""),
+        "category": "sales",
+        "type": "hubspot_profile",
+        "city": metadata.get("city", "") if metadata.get("city", "") != 'None' else '',
+        "country": metadata.get("country", "") if metadata.get("country", "") != 'None' else '',
+        "industry": metadata.get("industry", "") if metadata.get("industry", "") != 'None' else '',
+        "author": metadata.get("author", "") if metadata.get("author", "") != 'None' else '',
         "partner": filename,
-        "market": metadata.get("country", "")
+        "market": metadata.get("country", "") if metadata.get("country", "") != 'None' else ''
     }
     logging.info(f"Итоговые метаданные: {final_metadata}")
 
@@ -68,8 +70,9 @@ def process_file(filepath):
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
     params = {
         'label': 'hubspot',
-        'metadata': json.dumps({k: v for k, v in final_metadata.items() if v}),
-        'document_id': filename + '.txt'
+        **final_metadata,
+        'document_id': filename + '.txt',
+        'id': filename + '.txt'
     }
     files = {'file': (filename + '.txt', file_content)}
     logging.info(f"Подготовлены данные запроса для {filepath}")

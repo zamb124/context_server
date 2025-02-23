@@ -8,7 +8,7 @@ import signal
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, List
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request
@@ -185,6 +185,43 @@ async def add_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def process_results(results: List[Dict[str, Any]], label: ValidLabels, query: Query) -> List[Dict[str, Any]]:
+    """
+    Обрабатывает результаты поиска, заменяя чанки целым документом, если доля чанков превышает определенный порог.
+    """
+    source_document_ids = {}
+    for result in results:
+        source_document_id = result['metadata'].get('source_document_id')
+        if source_document_id:
+            source_document_ids[source_document_id] = source_document_ids.get(source_document_id, 0) + 1
+
+    for source_document_id, count in source_document_ids.items():
+        if count > 5:
+            # Remove the chunks from results
+            results = [result for result in results if result['metadata'].get('source_document_id') != source_document_id]
+
+            # Fetch the entire document by source_document_id
+            collection = get_collection(label.value)
+            full_document_results = collection.get(
+                where={"source_document_id": source_document_id},
+                include=["documents", "metadatas"]
+            )
+
+            if full_document_results and full_document_results['documents']:
+                # Create result entries for each document found
+                for i in range(len(full_document_results['ids'])):
+                    results.append({
+                        'id': full_document_results['ids'][i],
+                        'document': full_document_results['documents'][i],
+                        'metadata': full_document_results['metadatas'][i],
+                        'distance': None,  # Distance not applicable for full documents
+                        'label': label
+                    })
+            break  # Only process one document at a time
+
+    return results
+
+
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
 async def query_documents(query: Query):
     """Выполняет поиск документов в векторном хранилище."""
@@ -195,34 +232,31 @@ async def query_documents(query: Query):
             results = collection.query(
                 query_texts=[query.text],
                 n_results=query.n_results,
-                where=query.where  # Фильтры по метаданным
+                where=query.where,  # Фильтры по метаданным
+                include=["documents", "metadatas", "distances"]  # Добавляем distances в include
             )
-            """
-                $eq – оператор "равно". Другие операторы:
-                $ne: Не равно
-                $gt: Больше
-                $gte: Больше или равно
-                $lt: Меньше
-                $lte: Меньше или равно
-                $in: Значение находится в списке значений (например, {"category": {"$in": ["blog", "news"]}})
-                $nin: Значение отсутствует в списке значений
-                $contains: Строка содержит подстроку (например, {"author": {"$contains": "Doe"}})
-                $like: Строка соответствует шаблону SQL-стиля LIKE.
-            """
-            # Добавляем результаты в общий список
+
+            extracted_results = []
             for i in range(len(results['ids'][0])):
-                all_results.append({
+                extracted_results.append({
                     'id': results['ids'][0][i],
                     'document': results['documents'][0][i],
                     'metadata': results['metadatas'][0][i],
-                    'distance': results['distances'][0][i] if 'distances' in results else None,  # Добавляем расстояние
+                    'distance': results['distances'][0][i],
                     'label': label  # Добавляем label
                 })
+            all_results.extend(extracted_results)
+
         except Exception as e:
             logging.error(f"Ошибка при запросе label {label}: {e}")  # Логируем ошибку, но продолжаем
-            # raise HTTPException(status_code=500, detail=str(e)) # Можно и выкидывать исключение, но лучше обработать все label
 
-    # Возвращаем все результаты, объединенные в один список
+    # Сортируем результаты по расстоянию (по возрастанию)
+    all_results.sort(key=lambda x: x['distance'])
+
+    # Process the results to potentially replace chunks with the entire document
+    #final_results = await process_results(all_results, query.labels[0], query) # Assuming the first label is the relevant one
+
+    # Возвращаем все результаты, отсортированные по релевантности
     return ContextResponse(results=all_results)
 
 

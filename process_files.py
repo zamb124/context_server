@@ -60,7 +60,7 @@ def process_file(filepath):
         "country": metadata.get("country", "") if metadata.get("country", "") != 'None' else '',
         "industry": metadata.get("industry", "") if metadata.get("industry", "") != 'None' else '',
         "author": metadata.get("author", "") if metadata.get("author", "") != 'None' else '',
-        "partner": filename,
+        "partner": filename or '',
         "market": metadata.get("country", "") if metadata.get("country", "") != 'None' else ''
     }
     logging.info(f"Итоговые метаданные: {final_metadata}")

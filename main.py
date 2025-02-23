@@ -124,6 +124,7 @@ from fastapi import Depends
 
 @app.post("/add_document/", dependencies=[Depends(verify_token)])
 async def add_document(
+        request: Request,
         file: UploadFile = File(...),
         label: ValidLabels = FastAPIQuery(
             description="Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле."),

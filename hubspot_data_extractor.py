@@ -374,6 +374,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         company_json = {
             "city": company_data["properties"].get("city", ""),
             "country": company_data["properties"].get("country", ""),
+            "name": company_data["properties"].get("name", "No Name"),
             "industry": company_data["properties"].get("industry", ""),
             "id": company_data["id"],
             "domain": company_data["properties"].get("domain", ""),

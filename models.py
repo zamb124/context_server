@@ -24,6 +24,7 @@ class DocumentType(Enum):
     NOTE = 'note'
     WIKI = 'wiki'
     STARTREK_TICKET = 'startrek_ticket'
+    CONTACT = 'contact'
 
 
 

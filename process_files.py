@@ -50,37 +50,38 @@ def process_file(filepath):
         "name": data.get("name", "No name"),  # Add name
         "country": data.get("country", ""),
         "industry": data.get("industry", ""),
+        "type": data.get("type"),
         "id": data.get("id", ""),
         "domain": data.get("domain", ""),
         "description": data.get("description", ""),
     }
-    upload_data(company_data, filename, 'company')
+    upload_data(company_data, filename, 'company',data)
 
     # Process contacts
     if 'contacts' in data and isinstance(data['contacts'], list):
         for contact in data['contacts']:
-            upload_data(contact, filename, 'contact')
+            upload_data(contact, filename, 'contact',data)
 
     # Process notes
     if 'notes' in data and isinstance(data['notes'], list):
         for note in data['notes']:
-            upload_data(note, filename, 'note')
+            upload_data(note, filename, 'note',data)
 
     # Process emails
     if 'emails' in data and isinstance(data['emails'], list):
         for email in data['emails']:
-            upload_data(email, filename, 'email')
+            upload_data(email, filename, 'email',data)
 
      # Process calls
     if 'calls' in data and isinstance(data['calls'], list):
         for call in data['calls']:
-            upload_data(call, filename, 'call')
+            upload_data(call, filename, 'call',data)
 
 
     logging.info(f"Файл {filepath} успешно обработан.")
 
 
-def upload_data(item, filename, item_type):
+def upload_data(item, filename, item_type, source_data):
     """
     Uploads a single item to the API.
 
@@ -93,8 +94,6 @@ def upload_data(item, filename, item_type):
 
     document_id = item['id']
 
-    if item_type != 'company':
-        document_id += '_' + str(hash(json.dumps(item)))
 
     metadata = {
         "category": "sales",
@@ -104,19 +103,12 @@ def upload_data(item, filename, item_type):
     }
 
     # Add specific metadata based on item_type
-    if item_type == 'company':
-        metadata['city'] = item.get("city", "")
-        metadata['country'] = item.get("country", "")
-        metadata['industry'] = item.get("industry", "")
-        metadata['partner_search'] = clean_text(filename.lower())
-        metadata['id'] = document_id
-    else:
-        metadata['city'] = ""
-        metadata['country'] = ""
-        metadata['industry'] = ""
-        metadata['partner_search'] = ""
-        metadata['id'] = document_id # Include ID in metadata for non-company types
-
+    metadata['city'] = source_data.get("city", "")
+    metadata['country'] = source_data.get("country", "")
+    metadata['industry'] = source_data.get("industry", "")
+    metadata['partner_search'] = clean_text(filename.lower())
+    metadata['id'] = document_id
+    metadata['type'] = item['type']
 
     data_to_send = {
         "text": json.dumps(item),  # The entire item data as a JSON string

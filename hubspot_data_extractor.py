@@ -157,8 +157,10 @@ class HubSpotDataExtractor:  # Переименованный класс для 
             data = await self._fetch_data(url, params=params)
             if data is None:  # Выйти, если получение полностью не удалось
                 break
-
-            results.append(data)
+            if company_id:
+                results.append(data)
+            else:
+                results.extend(data.get("results", []))
 
 
             after = data.get("paging", {}).get("next", {}).get("after")
@@ -420,7 +422,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         """Извлекает все компании и создает отдельные json файлы для каждой компании."""
 
         companies = await self.fetch_all(
-            "companies", properties=["name", "description", "domain", "city", "phone", "industry", "state"],
+            "companies", properties=["name", "description", "domain", "city", "phone", "industry", "state", "id"],
             company_id=company_id)
 
         if not companies:
@@ -488,7 +490,7 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = '18149319775'
+            company_id_to_process = None
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

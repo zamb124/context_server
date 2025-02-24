@@ -1,8 +1,10 @@
 import json
 import logging
 import os
-import time
 import re
+import time
+import concurrent.futures
+import traceback
 
 import requests
 
@@ -16,6 +18,7 @@ logging.basicConfig(level=logging.INFO,
 def clean_text(text):
     """Removes all characters except letters and numbers from the text."""
     return re.sub(r'[^a-zA-Z0-9]', '', text)
+
 
 def process_file(filepath):
     """
@@ -55,28 +58,27 @@ def process_file(filepath):
         "domain": data.get("domain", ""),
         "description": data.get("description", ""),
     }
-    upload_data(company_data, filename, 'company',data)
+    upload_data(company_data, filename, 'company', data)
 
     # Process contacts
     if 'contacts' in data and isinstance(data['contacts'], list):
-        for contact in data['contacts']:
-            upload_data(contact, filename, 'contact',data)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(lambda contact: upload_data(contact, filename, 'contact', data), data['contacts'])
 
     # Process notes
     if 'notes' in data and isinstance(data['notes'], list):
-        for note in data['notes']:
-            upload_data(note, filename, 'note',data)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(lambda note: upload_data(note, filename, 'note', data), data['notes'])
 
     # Process emails
     if 'emails' in data and isinstance(data['emails'], list):
-        for email in data['emails']:
-            upload_data(email, filename, 'email',data)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(lambda email: upload_data(email, filename, 'email', data), data['emails'])
 
-     # Process calls
+    # Process calls
     if 'calls' in data and isinstance(data['calls'], list):
-        for call in data['calls']:
-            upload_data(call, filename, 'call',data)
-
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(lambda call: upload_data(call, filename, 'call', data), data['calls'])
 
     logging.info(f"Файл {filepath} успешно обработан.")
 
@@ -94,7 +96,6 @@ def upload_data(item, filename, item_type, source_data):
 
     document_id = item['id']
 
-
     metadata = {
         "category": "sales",
         "type": item_type,
@@ -103,9 +104,9 @@ def upload_data(item, filename, item_type, source_data):
     }
 
     # Add specific metadata based on item_type
-    metadata['city'] = source_data.get("city", "")
-    metadata['country'] = source_data.get("country", "")
-    metadata['industry'] = source_data.get("industry", "")
+    metadata['city'] = source_data.get("city", "") or ''
+    metadata['country'] = source_data.get("country", "") or ''
+    metadata['industry'] = source_data.get("industry", "") or ''
     metadata['partner_search'] = clean_text(filename.lower())
     metadata['id'] = document_id
     metadata['type'] = item['type']
@@ -123,7 +124,6 @@ def upload_data(item, filename, item_type, source_data):
     url = 'https://foodforce.tech/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
-
     # Send request with retries
     retries = 0
     max_retries = 30
@@ -131,9 +131,10 @@ def upload_data(item, filename, item_type, source_data):
 
     while retries < max_retries:
         retries += 1
-        logging.info(f"Отправка POST запроса (попытка {retries}/{max_retries}) типа {item_type} для {filename} с задержкой {delay} сек.")
+        logging.info(
+            f"Отправка POST запроса (попытка {retries}/{max_retries}) типа {item_type} для {filename} с задержкой {delay} сек.")
         try:
-            response = requests.post(url, headers=headers, json=data_to_send)  # Send JSON payload
+            response = requests.post(url, headers=headers, json=data_to_send, verify=False)  # Send JSON payload
             response.raise_for_status()  # Raise HTTPError for bad responses
 
             logging.info(f"Данные типа {item_type} для {filename} успешно отправлены.")
@@ -142,6 +143,7 @@ def upload_data(item, filename, item_type, source_data):
             return  # Exit loop if successful
 
         except requests.exceptions.RequestException as e:
+            traceback.print_exc()
             logging.error(f"Ошибка при отправке данных типа {item_type} для {filename}: {e}")
             if retries == 5:
                 delay = 2
@@ -156,18 +158,18 @@ def upload_data(item, filename, item_type, source_data):
     logging.error(f"Не удалось отправить данные типа {item_type} для {filename} после {max_retries} попыток.")
 
 
-
 def main():
     """
     Main function to iterate through files and process them.
     """
     directory = "hubspot_company_data"
+    files = [os.path.join(directory, filename) for filename in os.listdir(directory) if filename.endswith(".json")]
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")
-    for filename in os.listdir(directory):
-        if filename.endswith(".json"):
-            filepath = os.path.join(directory, filename)
-            process_file(filepath)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        executor.map(process_file, files)
+
     logging.info("Основной процесс завершен.")
 
 

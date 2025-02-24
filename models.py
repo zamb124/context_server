@@ -27,7 +27,6 @@ class DocumentType(Enum):
     CONTACT = 'contact'
 
 
-
 class BaseMetadata(BaseModel):
     type: DocumentType
     author: str
@@ -45,6 +44,9 @@ class BaseMetadata(BaseModel):
             return country.alpha_2  # Возвращаем ISO 3166-1 alpha-2 код страны
         except LookupError:
             return v
+
+    class Config:
+        extra = 'allow'
 
 
 class ValidatedTelegramMetadata(BaseMetadata):

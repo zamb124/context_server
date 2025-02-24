@@ -10,10 +10,13 @@ import sys
 import traceback
 from contextlib import asynccontextmanager
 from typing import Dict, Optional, Any, Tuple, List
+
+from pydantic import BaseModel
+
 from chromadb_utils import client
 import uvicorn
 from chromadb import PersistentClient
-from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request
+from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request, Body, Depends
 
 from chromadb_utils import get_collection, upsert_to_collection
 from config import config  # Убедитесь, что config.py содержит CHAT_TOKEN и TELEGRAM_BOT_TOKEN
@@ -23,6 +26,9 @@ from models import ValidLabels, DocumentBase, Query, ContextResponse, ForceSaveR
 # Import the new module
 from telegram_integration import telegram_integration
 from text_utils import split_text_semantically
+
+# --- Импорт Transformers и Pipeline ---
+from transformers import pipeline, AutoTokenizer
 
 # --- Конфигурация ---
 CHROMA_DB_PATH = "chroma_db"  # Папка, где будет храниться база данных ChromaDB
@@ -41,7 +47,6 @@ if not TELEGRAM_BOT_TOKEN:
 # --- Инициализация логирования ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
-
 
 # --- FastAPI App ---
 @asynccontextmanager
@@ -95,92 +100,59 @@ async def verify_token(authorization: Optional[str] = Header(None)):
     return True
 
 
-def extract_metadata_from_query_params(request: Request) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+class AddDocumentRequest(BaseModel):
     """
-    Extracts metadata from query parameters, separating core metadata from extra attributes.
+    Модель запроса для добавления документа.
     """
-    query_params = request.query_params
-    metadata = {}
-    extra_attributes = {}
-
-    # Core metadata parameters
-    core_metadata_keys = ["type", "author", "partner", "chunk", "category", "country"]
-
-    for key, value in query_params.items():
-        if key in core_metadata_keys:
-            # Convert string boolean values to boolean type
-            if value.lower() == 'true':
-                value = True
-            elif value.lower() == 'false':
-                value = False
-
-            metadata[key] = value
-        elif key not in ["label", "document_id"]:  # Exclude label and document_id
-            extra_attributes[key] = value
-
-    return metadata, extra_attributes
-
-
-from fastapi import Depends
-
+    text: str
+    label: ValidLabels
+    document_id: Optional[str] = None
+    metadata: DocumentBase
+    chunk: Optional[bool] = True
+    author: Optional[str] = None
 
 @app.post("/add_document/", dependencies=[Depends(verify_token)])
-async def add_document(
-        request: Request,
-        file: UploadFile = File(...),
-        label: ValidLabels = FastAPIQuery(
-            description="Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле."),
-        document_id: Optional[str] = FastAPIQuery(
-            description="Уникальный идентификатор документа. Если не указан, используется имя файла."),
-        metadata: DocumentBase = Depends()  # Используем Depends для валидации и отображения в Swagger
-):
+async def add_document(request_data: AddDocumentRequest = Body(...)):
     """
-        Добавляет документ в векторное хранилище.
+        Добавляет текст как документ в векторное хранилище, принимая JSON payload.
 
-        - **file**: Загружаемый файл.
+        - **text**: Текст документа для добавления.
         - **label**: Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле.
-        - **document_id**: Уникальный идентификатор документа. Если не указан, используется имя файла.
-        - **metadata**: Метаданные документа.
+        - **document_id**: Уникальный идентификатор документа. Если не указан, генерируется автоматически.
+        - **metadata**: Словарь с метаданными документа.  Дополнительные поля будут сохранены.
     """
     try:
-        file_content = await file.read()
-        file_io = io.BytesIO(file_content)
-        file_type = file.filename.split(".")[-1].lower()
+        text = request_data.text
+        label = request_data.label
+        document_id = request_data.document_id
+        metadata = request_data.metadata
 
-        if file_type == "pdf":
-            text = await extract_text_from_pdf(file_io)
-        elif file_type == "txt":
-            text = await extract_text_from_txt(file_io)
-        elif file_type == "docx":
-            text = await extract_text_from_docx(file_io)
-        elif file_type == "json":
-            text = await extract_text_from_json(file_io)
-        elif file_type == "xlsx":
-            text = await extract_text_from_xlsx(file_io)
-        else:
-            raise HTTPException(status_code=400, detail="Неподдерживаемый формат файла")
-        document_id = document_id or file.filename
+        # Generate document_id if not provided
+        document_id = document_id or f"doc_{label}_{hash(text)}"
 
         collection = get_collection(label.value)
         # Удаляем старые чанки документа, если они есть
         collection.delete(where={"source_document_id": document_id})
-        if metadata.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false
+
+        combined_metadata = json.loads(metadata.model_dump_json())
+
+        if request_data.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false
             # Разбиваем на чанки
             chunks = await split_text_semantically(text)
             chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
             metadatas = []
             for i in range(len(chunks)):
-                chunk_metadata = json.loads(metadata.model_dump_json())
+                chunk_metadata = combined_metadata
                 chunk_metadata["source_document_id"] = document_id
                 metadatas.append(chunk_metadata)
             await upsert_to_collection(collection, chunks, metadatas, chunk_ids)
         else:
             # Сохраняем файл целиком
-            metadata.source_document_id = document_id  # Добавляем source_document_id
-            await upsert_to_collection(collection, [text], [json.loads(metadata.model_dump_json())], [document_id])
+            combined_metadata["source_document_id"] = document_id  # Добавляем source_document_id
+            await upsert_to_collection(collection, [text], [combined_metadata], [document_id])
 
-        return {"message": f"Документ {file.filename} успешно обработан и добавлен с label {label} и ID {document_id}."}
+        return {"message": f"Документ успешно обработан и добавлен с label {label} и ID {document_id}."}
 
     except Exception as e:
         traceback.print_exc()
@@ -224,16 +196,58 @@ async def process_results(results: List[Dict[str, Any]], label: ValidLabels, que
     return results
 
 
+# # --- Инициализация pipeline для фильтрации контекста (ВЫНЕСТИ ЗА ПРЕДЕЛЫ ФУНКЦИИ, ЧТОБЫ НЕ ПЕРЕИНИЦИАЛИЗИРОВАТЬ КАЖДЫЙ РАЗ) ---
+# try:
+#     context_filter_pipeline = pipeline("text2text-generation", model="facebook/bart-base", device="cuda:0")
+#     print("BART-base loaded successfully with CUDA")
+# except Exception as e:
+#     print(f"Error loading BART-base with CUDA: {e}")
+#     context_filter_pipeline = pipeline("text2text-generation", model="facebook/bart-base", device="cpu")
+#     print("BART-base loaded successfully on CPU")
+
+def create_prompt(question, context):
+    """Создает prompt для фильтрации контекста."""
+    prompt = f"""
+    You are provided with a question and context derived from the knowledge base.
+    Your task is to select from the context only the information that is most relevant to answer the question.
+    Leave only meaningful suggestions and exclude unnecessary details.
+    question: {question}
+    context: {context}
+    relevant context:
+    """
+    return prompt
+
+
+def filter_context_with_local_llm(question, context):
+    max_context_length = 2048
+    if len(context) > max_context_length:
+        context = context[:max_context_length]
+    prompt = create_prompt(question, context)
+
+    tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base", model_max_length=2048) # Ensure correct tokenizer
+
+    # Tokenize the prompt and check token IDs
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    input_ids = inputs["input_ids"][0]
+    vocab_size = tokenizer.vocab_size
+    for token_id in input_ids:
+        if token_id >= vocab_size:
+            print(f"Error: Token ID {token_id} is out of vocabulary range (0-{vocab_size-1})")
+            return ""  # or handle the error in another way
+
+    filtered_context = context_filter_pipeline(prompt, max_length=2048, truncation=True)[0]['generated_text']
+    return filtered_context
+
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
 async def query_documents(query: Query):
-    """Выполняет поиск документов в векторном хранилище."""
+    """Выполняет поиск документов в векторном хранилище и фильтрует контекст локальной LLM."""
     all_results = []
     for label in query.labels:  # Итерируемся по списку labels
         try:
             collection = get_collection(label.value)  # Получаем коллекцию для label
             results = collection.query(
                 query_texts=[query.text],
-                n_results=query.n_results,
+                n_results=1,
                 where=query.where,  # Фильтры по метаданным
                 include=["documents", "metadatas", "distances"]  # Добавляем distances в include
             )
@@ -255,11 +269,26 @@ async def query_documents(query: Query):
     # Сортируем результаты по расстоянию (по возрастанию)
     all_results.sort(key=lambda x: x['distance'])
 
-    # Process the results to potentially replace chunks with the entire document
-    #final_results = await process_results(all_results, query.labels[0], query) # Assuming the first label is the relevant one
+    # Concatenate documents from all results into a single context string
+    context = "\n".join([result['document'] for result in all_results])
 
-    # Возвращаем все результаты, отсортированные по релевантности
+    # Filter the context with the local LLM
+    #filtered_context = filter_context_with_local_llm(query.text, context)
+
+    # gpt_response = await call_expensive_gpt(query.text, filtered_context)
+
+    # Создаем результат с отфильтрованным контекстом
+    # filtered_result = {
+    #     'id': 'filtered_context',
+    #     'document': filtered_context,
+    #     'metadata': {},
+    #     'distance': 0,
+    #     'label': 'filtered'
+    # }
+
+    # Возвращаем только отфильтрованный контекст
     return ContextResponse(results=all_results)
+
 
 
 @app.delete("/delete_document/{document_id}/{label}", dependencies=[Depends(verify_token)])

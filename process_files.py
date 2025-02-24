@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+import re
 
 import requests
 
@@ -12,9 +13,13 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+def clean_text(text):
+    """Removes all characters except letters and numbers from the text."""
+    return re.sub(r'[^a-zA-Z0-9]', '', text)
+
 def process_file(filepath):
     """
-    Processes a single file, extracts metadata, and uploads it using requests.
+    Processes a single JSON file, extracts data, and uploads it to the API.
 
     Args:
         filepath (str): The full path to the file.
@@ -24,78 +29,128 @@ def process_file(filepath):
     try:
         logging.info(f"Открываю файл: {filepath}")
         with open(filepath, 'r', encoding='utf-8') as f:
-            first_line = f.readline().strip()
-            file_content = f.read()  # Read the rest of the file content
+            data = json.load(f)
         logging.info(f"Файл {filepath} открыт и содержимое прочитано.")
 
     except FileNotFoundError:
         logging.error(f"Ошибка: Файл не найден: {filepath}")
         return
+    except json.JSONDecodeError as e:
+        logging.error(f"Ошибка: Некорректный JSON в файле {filepath}: {e}")
+        return
     except Exception as e:
         logging.error(f"Ошибка при чтении файла {filepath}: {e}")
         return
 
-    # Extract filename
     filename = os.path.splitext(os.path.basename(filepath))[0]
-    logging.info(f"Извлечено имя файла: {filename}")
 
-    # Parse metadata
-    metadata = {"category": "partner"}
-    if "metadata=" in first_line:
-        logging.info("Разбираю метаданные из первой строки.")
-        metadata_str = first_line.split("metadata=")[1]
-        metadata_pairs = metadata_str.split(";")
-        for pair in metadata_pairs:
-            if ":" in pair:
-                key, value = pair.split(":", 1)
-                metadata[key.strip()] = value.strip()
-        logging.info(f"Извлечены метаданные: {metadata}")
-
-    metadata["partner"] = filename
-
-    final_metadata = {
-        "category": "sales",
-        "type": "hubspot_profile",
-        "city": metadata.get("city", "") if metadata.get("city", "") != 'None' else '',
-        "country": metadata.get("country", "") if metadata.get("country", "") != 'None' else '',
-        "industry": metadata.get("industry", "") if metadata.get("industry", "") != 'None' else '',
-        "author": metadata.get("author", "") if metadata.get("author", "") != 'None' else '',
-        "partner": filename or '',
-        "market": metadata.get("country", "") if metadata.get("country", "") != 'None' else ''
+    # Process company data
+    company_data = {
+        "city": data.get("city", ""),
+        "name": data.get("name", "No name"),  # Add name
+        "country": data.get("country", ""),
+        "industry": data.get("industry", ""),
+        "id": data.get("id", ""),
+        "domain": data.get("domain", ""),
+        "description": data.get("description", ""),
     }
-    logging.info(f"Итоговые метаданные: {final_metadata}")
+    upload_data(company_data, filename, 'company')
 
-    # Prepare request
+    # Process contacts
+    if 'contacts' in data and isinstance(data['contacts'], list):
+        for contact in data['contacts']:
+            upload_data(contact, filename, 'contact')
+
+    # Process notes
+    if 'notes' in data and isinstance(data['notes'], list):
+        for note in data['notes']:
+            upload_data(note, filename, 'note')
+
+    # Process emails
+    if 'emails' in data and isinstance(data['emails'], list):
+        for email in data['emails']:
+            upload_data(email, filename, 'email')
+
+     # Process calls
+    if 'calls' in data and isinstance(data['calls'], list):
+        for call in data['calls']:
+            upload_data(call, filename, 'call')
+
+
+    logging.info(f"Файл {filepath} успешно обработан.")
+
+
+def upload_data(item, filename, item_type):
+    """
+    Uploads a single item to the API.
+
+    Args:
+        item (dict): The data item to upload.
+        filename (str): The base filename for metadata.
+        item_type (str): The type of the item ('company', 'contact', 'note', 'email', 'call').
+    """
+    logging.info(f"Отправка данных типа {item_type} для файла {filename}")
+
+    document_id = item['id']
+
+    if item_type != 'company':
+        document_id += '_' + str(hash(json.dumps(item)))
+
+    metadata = {
+        "category": "sales",
+        "type": item_type,
+        "author": "system",
+        "partner": filename.lower(),
+    }
+
+    # Add specific metadata based on item_type
+    if item_type == 'company':
+        metadata['city'] = item.get("city", "")
+        metadata['country'] = item.get("country", "")
+        metadata['industry'] = item.get("industry", "")
+        metadata['partner_search'] = clean_text(filename.lower())
+        metadata['id'] = document_id
+    else:
+        metadata['city'] = ""
+        metadata['country'] = ""
+        metadata['industry'] = ""
+        metadata['partner_search'] = ""
+        metadata['id'] = document_id # Include ID in metadata for non-company types
+
+
+    data_to_send = {
+        "text": json.dumps(item),  # The entire item data as a JSON string
+        "label": "hubspot",
+        "document_id": document_id,
+        "author": "system",
+        "type": item_type,
+        "chunk": False,
+        "metadata": metadata
+    }
+
     url = 'https://foodforce.tech/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
-    params = {
-        'label': 'hubspot',
-        **final_metadata,
-        'document_id': filename + '.txt',
-        'id': filename + '.txt'
-    }
-    files = {'file': (filename + '.txt', file_content)}
-    logging.info(f"Подготовлены данные запроса для {filepath}")
+
 
     # Send request with retries
     retries = 0
-    max_retries = 30  # 5 with increasing + 25 at 20 sec
+    max_retries = 30
     delay = 1
 
     while retries < max_retries:
         retries += 1
-        logging.info(f"Отправка POST запроса (попытка {retries}/{max_retries}) для {filepath} с задержкой {delay} сек.")
+        logging.info(f"Отправка POST запроса (попытка {retries}/{max_retries}) типа {item_type} для {filename} с задержкой {delay} сек.")
         try:
-            response = requests.post(url, headers=headers, params=params, files=files)
+            response = requests.post(url, headers=headers, json=data_to_send)  # Send JSON payload
             response.raise_for_status()  # Raise HTTPError for bad responses
 
-            logging.info(f"Файл {filepath} успешно обработан.")
+            logging.info(f"Данные типа {item_type} для {filename} успешно отправлены.")
             logging.info(f"Код состояния ответа: {response.status_code}")
             logging.info(f"Содержимое ответа: {response.text}")
             return  # Exit loop if successful
 
         except requests.exceptions.RequestException as e:
-            logging.error(f"Ошибка при обработке {filepath}: {e}")
+            logging.error(f"Ошибка при отправке данных типа {item_type} для {filename}: {e}")
             if retries == 5:
                 delay = 2
             elif retries == 7:
@@ -103,10 +158,11 @@ def process_file(filepath):
             elif retries == 9:
                 delay = 10
             elif retries >= 10:
-                delay = 20  # Remaining retries at 20 sec
+                delay = 20
             time.sleep(delay)
 
-    logging.error(f"Не удалось обработать файл {filepath} после {max_retries} попыток.")
+    logging.error(f"Не удалось отправить данные типа {item_type} для {filename} после {max_retries} попыток.")
+
 
 
 def main():
@@ -117,7 +173,7 @@ def main():
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")
     for filename in os.listdir(directory):
-        if filename.endswith(".txt"):
+        if filename.endswith(".json"):
             filepath = os.path.join(directory, filename)
             process_file(filepath)
     logging.info("Основной процесс завершен.")

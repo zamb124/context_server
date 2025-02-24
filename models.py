@@ -15,8 +15,16 @@ class DocumentType(Enum):
     TELEGRAMM_MESSAGE = 'telegramm_message'
     OPS_DOCUMENT = 'ops_document'
     OPENAPI_SPEC = 'openapi_spec'
-    HUBSPOT_PROFILE = 'hubspot_profile'
+    COMPANY = 'company'
+    EMAIL = 'email'
     OTHER = 'other'
+    CALL = 'call'
+    MEETING = 'meeting'
+    TASK = 'task'
+    NOTE = 'note'
+    WIKI = 'wiki'
+    STARTREK_TICKET = 'startrek_ticket'
+
 
 
 class BaseMetadata(BaseModel):
@@ -60,7 +68,6 @@ class ValidLabels(str, Enum):
 # --- Модели данных ---
 class DocumentBase(BaseMetadata):
     id: str = Field(..., description="Уникальный идентификатор документа")
-    extra: Optional[str] = Field(default='', description="Дополнительные атрибуты документа")
 
 
 class Query(BaseModel):

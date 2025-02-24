@@ -8,10 +8,13 @@ from typing import Optional, Dict, Any, List
 import httpx
 
 from config import config  # Убедитесь, что config.py содержит HUBSPOT_API_KEY
+import json
 
 
 def clean_text(text: str) -> str:
     """Удаляет технические символы, такие как \n, \t, \r, HTML теги, а также символ >."""
+    if text is None:
+        return ""
     text = re.sub(r"[\n\t\r]", " ", text).strip()
     text = re.sub(r"<[^>]+>", "", text)  # Удаление HTML тегов
     if not text:
@@ -21,54 +24,68 @@ def clean_text(text: str) -> str:
 
 
 note_map = {
-    'hs_note_body': 'NOTE BODY'
+    'hs_timestamp': 'create_date',
+'id': 'id',
+    'hs_note_body': 'text',
 }
 email_map = {
-    'hs_timestamp': 'EMAIL DATETIME',
-    'hs_email_text': 'EMAIL TEXT',
-    'hs_email_subject': 'EMAIL SUBJECT',
-    'hs_email_from_email': 'EMAIL FROM',
-    'hs_email_from_firstname': 'EMAIL FROM FIRST NAME',
-    'hs_email_from_lastname': 'EMAIL FROM LAST NAME',
-    'hs_email_to_email': 'EMAIL TO',
-    'hs_email_to_firstname': 'EMAIL TO FIRST NAME',
-    'hs_email_to_lastname': 'EMAIL TO LAST NAME',
+    'hs_timestamp': 'create_date',
+    'id': 'id',
+    'hs_email_text': 'text',
+    'hs_email_subject': 'subject',
+    'hs_email_from_email': 'from',
+    'hs_email_from_firstname': 'from_firstname',
+    'hs_email_from_lastname': 'from_lastname',
+    'hs_email_to_email': 'to',
+    'hs_email_to_firstname': 'to_firstname',
+    'hs_email_to_lastname': 'to_lastname',
 }
 deal_map = {
-    'amount': 'AMOUNT',
-    'closedate': 'DEAL CLOSE DATE',
-    'dealname': 'DEAL NAME',
-    'pipeline': 'DEAL PIPELINE',
-    'dealstage': 'DEAL STAGE',
-    'hubspot_owner_id': 'DEAL OWNER ID',
-    'geography': 'DEAL GEOGRAPHY'
+    'hs_timestamp': 'create_date',
+'id': 'id',
+    'amount': 'amount',
+    'closedate': 'close_date',
+    'dealname': 'deal_name',
+    'pipeline': 'pipeline',
+    'dealstage': 'deal_stage',
+    'geography': 'geography'
 }
 
 call_map = {
-    'hs_timestamp': 'CALL DATETIME',
-    'hs_call_body': 'CALL BODY',
-    'hs_call_direction': 'CALL DIRECTION',
-    'hs_call_duration': 'CALL DURATION',
-    'hs_call_recording_url': 'CALL RECORDING URL',
-    'hs_call_title': 'CALL TITLE',
-    'hs_activity_type': 'TYPE',
-    'hs_call_from_number': 'CALL FROM NUMBER',
-    'hs_call_to_number': 'CALL TO NUMBER'
+    'hs_timestamp': 'create_date',
+'id': 'id',
+    'hs_call_body': 'body',
+    'hs_call_direction': 'call_direction',
+    'hs_call_duration': 'call_duration',
+    'hs_call_recording_url': 'call_recording_url',
+    'hs_call_title': 'call_title',
+    'hs_call_from_number': 'from_number',
+    'hs_call_to_number': 'to_number'
 }
 task_map = {
-    'hs_timestamp': 'TASK DATETIME',
-    'hs_task_body': 'TASK BODY',
-    'hs_task_subject': 'TASK SUBJECT',
-    'hs_task_type': 'TYPE'
+    'hs_timestamp': 'create_date',
+'id': 'id',
+    'hs_task_body': 'text',
+    'hs_task_subject': 'subject',
+    'hs_task_type': 'type'
 }
 meeting_map = {
-    'hs_timestamp': 'MEETING DATETIME',
-    'hs_meeting_title': 'MEETING TITLE',
-    'hs_meeting_body': 'MEETING BODY',
-    'hs_meeting_location': 'MEETING LOCATION',
-    'hs_meeting_start_time': 'MEETING START',
-    'hs_meeting_end_time': 'MEETING END'
+    'hs_timestamp': 'create_date',
+'id': 'id',
+    'hs_meeting_title': 'title',
+    'hs_meeting_body': 'body',
+    'hs_meeting_location': 'location',
+    'hs_meeting_start_time': 'start_time',
+    'hs_meeting_end_time': 'end_time'
 }
+activities_maps = {
+            'note': note_map,
+            'email': email_map,
+            'deal': deal_map,
+            'call': call_map,
+            'task': task_map,
+            'meeting': meeting_map
+        }
 
 
 class HubSpotDataExtractor:  # Переименованный класс для ясности и цели
@@ -124,7 +141,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Теперь также поддерживает извлечение связанных объектов.
         Добавлена возможность фильтрации по ID компании в коде.
         """
-        url = f"{self.BASE_URL}/{object_type}"
+        url = f"{self.BASE_URL}/{object_type}{f'/{company_id}' if company_id else ''}"
         params = {"limit": 100}
         if properties:
             params["properties"] = ",".join(properties)
@@ -141,18 +158,8 @@ class HubSpotDataExtractor:  # Переименованный класс для 
             if data is None:  # Выйти, если получение полностью не удалось
                 break
 
-            # Если указан ID компании, фильтруем результаты
-            if company_id:
-                filtered_results = []
-                for item in data.get("results", []):
-                    # Проверяем, связана ли сущность с указанной компанией
-                    if item.get("associations") and item.get("associations").get("companies") and any(
-                            result.get("id") == company_id for result in
-                            item.get("associations").get("companies").get("results", [])):
-                        filtered_results.append(item)
-                results.extend(filtered_results)
-            else:
-                results.extend(data.get("results", []))
+            results.append(data)
+
 
             after = data.get("paging", {}).get("next", {}).get("after")
             if not after:
@@ -164,7 +171,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Извлекает исчерпывающие данные для одной компании, включая связанные контакты и действия.
         """
         company_properties = ["name", "domain", "industry", "phone", "website", "description", "contacts",
-                              "activites", "deals", "geography","country", "city"]  # Добавлено описание
+                              "activites", "deals", "geography", "country", "city"]  # Добавлено описание
         # Изменяем вызов fetch_all, чтобы вернуть только одну компанию по ID
         url = f"{self.BASE_URL}/companies/{company_id}"
         params = {"properties": ",".join(company_properties),
@@ -210,12 +217,12 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         associated_activities = []
 
         # Теперь получаем IDs связанных заметок (если они есть в company_data - adapt to your actual data!)
-        note_ids = company_data.get("associations", {}).get("notes", {}).get("results", [])
-        email_ids = company_data.get("associations", {}).get("emails", {}).get("results", [])
-        call_ids = company_data.get("associations", {}).get("calls", {}).get("results", [])
-        task_ids = company_data.get("associations", {}).get("tasks", {}).get("results", [])
-        meeting_ids = company_data.get("associations", {}).get("meetings", {}).get("results", [])
-        deals_ids = company_data.get("associations", {}).get("deals", {}).get("results", [])
+        note_ids = [note.get("id") for note in company_data.get("associations", {}).get("notes", {}).get("results", []) if note]
+        email_ids = [email.get("id") for email in company_data.get("associations", {}).get("emails", {}).get("results", []) if email]
+        call_ids = [call.get("id") for call in company_data.get("associations", {}).get("calls", {}).get("results", []) if call]
+        task_ids = [task.get("id") for task in company_data.get("associations", {}).get("tasks", {}).get("results", []) if task]
+        meeting_ids = [meeting.get("id") for meeting in company_data.get("associations", {}).get("meetings", {}).get("results", []) if meeting]
+        deals_ids = [deal.get("id") for deal in company_data.get("associations", {}).get("deals", {}).get("results", []) if deal]
 
         # Функция для получения информации об одном объекте по ID
         async def get_activity_by_id(object_type: str, object_id: str, params: dict) -> Optional[Dict[str, Any]]:
@@ -226,8 +233,8 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         # Получаем информацию о каждой заметке
         for note_id in note_ids:
             note = await get_activity_by_id(
-                "notes", note_id.get("id"),
-                params={"properties": "hs_note_body"}
+                "notes", note_id,
+                params={"properties": "hs_note_body,hs_timestamp"}
             )
             if note:
                 associated_activities.append({
@@ -239,7 +246,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         # Получаем информацию о каждом email
         for email_id in email_ids:
             email = await get_activity_by_id(
-                "emails", email_id.get("id"),
+                "emails", email_id,
                 params={
                     "properties": ",".join([i for i in email_map.keys()])
                 }
@@ -253,7 +260,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         # Получаем информацию о каждом deal
         for deal_id in deals_ids:
             deal = await get_activity_by_id(
-                "deals", deal_id.get("id"),
+                "deals", deal_id,
                 params={
                     "properties": ",".join([i for i in deal_map.keys()])
                 }
@@ -269,7 +276,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         for call_id in call_ids:
 
             call = await get_activity_by_id(
-                "calls", call_id.get("id"),
+                "calls", call_id,
                 params={
                     "properties": ",".join([i for i in call_map.keys()])
                 }
@@ -285,7 +292,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         for task_id in task_ids:
 
             task = await get_activity_by_id(
-                "tasks", task_id.get("id"),
+                "tasks", task_id,
                 params={
                     "properties": ",".join([i for i in task_map.keys()])
                 }
@@ -301,7 +308,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         for meeting_id in meeting_ids:
 
             meeting = await get_activity_by_id(
-                "meetings", meeting_id.get("id"),
+                "meetings", meeting_id,
                 params={
                     "properties": ",".join([i for i in meeting_map.keys()])
                 }
@@ -359,53 +366,65 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                             f"Ошибка обработки документа {attachment_name} из {attachment_url}: {e}")
         return document_texts
 
-    def build_company_text(self, company_data: Dict[str, Any], contacts: List[Dict[str, Any]],
-                           activities: List[Dict[str, Any]]) -> str:
+    def build_company_json(self, company_data: Dict[str, Any], contacts: List[Dict[str, Any]],
+                             activities: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Создает единый текстовый блок из данных компании, контактов и действий,
-        используя разделители для логической структуры.
+        Создает JSON-структуру данных компании, контактов и действий.
         """
-        text = f'metadata=city:{company_data["properties"].get("city", "")};country:{company_data["properties"].get("country", "")};industry:{company_data["properties"].get("industry", "")}\n'
-        text += f"COMPANY: {company_data['properties'].get('name', '')}\n"  # Основная информация о компании
-        text += f"ID: {company_data['id']}\n"
-        text += f"DOMAIN: {company_data['properties'].get('domain', '')}\n"
-        text += f"CITY: {company_data['properties'].get('city', '')}\n"
-        text += f"COUNTRY: {company_data['properties'].get('country', '')}\n"
-        text += clean_text(f"DESCRIPTION: {company_data['properties'].get('description', '')}\n")
-        text += "    \n\n"  # Разделитель между компанией и контактами
+        company_json = {
+            "city": company_data["properties"].get("city", ""),
+            "country": company_data["properties"].get("country", ""),
+            "industry": company_data["properties"].get("industry", ""),
+            "id": company_data["id"],
+            "domain": company_data["properties"].get("domain", ""),
+            "description": clean_text(company_data["properties"].get("description", "")),
+            "type": "company",
+            "contacts": [],
+            "notes": [],
+            "emails": [],
+            "calls": [],
+            "tasks": [],
+            "meetings": [],
+            "deals": []
+        }
 
-        text += "CONTACTS:\n"
         for contact in contacts:
-            text += f"  CONTACT: {contact['properties'].get('firstname', 'Нет имени')} {contact['properties'].get('lastname', 'Нет фамилии')}\n"
-            text += f"  JOB TITLE: {contact['properties'].get('jobtitle', 'Нет email')}\n"
-            text += f"  EMAIL: {contact['properties'].get('email', 'Нет email')}\n"
-            text += f"  PHONE: {contact['properties'].get('phone', 'Нет телефона')}\n"
-            text += "   \n"  # Разделитель между контактами
-        text += "    \n\n"  # Разделитель между контактами и активностями
+            contact_data = {
+                "name": f"{contact['properties'].get('firstname', '')} {contact['properties'].get('lastname', '')}",
+                "job_title": contact['properties'].get('jobtitle', ''),
+                "email": contact['properties'].get('email', ''),
+                "phone": contact['properties'].get('phone', ''),
+                "type": "contact",
+                "id": contact['id']
 
-        text += "ACTIVITIES:\n"
+            }
+            company_json["contacts"].append(contact_data)
+
+
         for activity in activities:
-            text += f"  TYPE: {activity['type']}\n"
-            text += f"  ID: {activity['id']}\n"
-            # Добавляем свойства активности, адаптируясь к их типу
-            for k, v in eval(f"{activity['type']}_map").items():
-                text += "   "  # разделитель между полями активности
-                text += clean_text(f"  {v}: {activity['properties'].get(k, 'Нет данных')}")
-                text += "   \n"  # разделитель между полями активности
-            text += "   \n"  # разделитель между активностями
-        text += "    \n"  # Разделитель между компанией и другими компаниями
-        return text
+            activity_type = activity["type"]
+            properties = activity["properties"]
+            activities_map = activities_maps.get(activity_type)
+            new_activity = {}
+            for k, v in activities_map.items():
+                new_activity[v] = clean_text(properties.get(k, ""))
+            new_activity["type"] = activity_type
+            new_activity['id'] = activity['id']
+            company_json[activity_type + "s"].append(new_activity)
+
+
+        return company_json
 
     async def process_all_companies(self, company_id: Optional[str] = None):
-        """Извлекает все компании и создает отдельные текстовые файлы для каждой компании."""
+        """Извлекает все компании и создает отдельные json файлы для каждой компании."""
 
-        if company_id:
-            companies = [{"id": company_id}]  # Создаем список только с одним ID компании
-        else:
-            companies = await self.fetch_all("companies", properties=["name"])
-            if not companies:
-                logging.warning("Компании в HubSpot не найдены.")
-                return
+        companies = await self.fetch_all(
+            "companies", properties=["name", "description", "domain", "city", "phone", "industry", "state"],
+            company_id=company_id)
+
+        if not companies:
+            logging.warning("Компании в HubSpot не найдены.")
+            return
 
         logging.info(f"Найдено {len(companies)} компаний. Начинаем обработку...")
 
@@ -418,8 +437,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
             except Exception as e:
                 traceback.print_exc()
                 company_name = company['properties'].get('name', 'Без названия')
-            output_file = os.path.join(self.output_dir, f"{company_name}.txt")
-
+            output_file = os.path.join(self.output_dir, f"{company_name}.json")
 
             if os.path.exists(output_file):
                 logging.info(f"Файл для компании {company_name} ({company_id}) уже существует. Пропускаем.")
@@ -432,24 +450,26 @@ class HubSpotDataExtractor:  # Переименованный класс для 
                 continue
 
             # Извлекаем контакты и действия
-            contacts_ids = [i['id'] for i in
-                            company_data.get("associations", {}).get("contacts", {}).get("results", [])]
+            contacts_ids = [i.get('id') for i in
+                            company_data.get("associations", {}).get("contacts", {}).get("results", []) if
+                            i is not None]
+
             contacts = await self.get_associated_contacts(contacts_ids)
             activities = await self.get_associated_activities(company_data)
 
-            # Создаем текстовый блок для компании
-            company_text = self.build_company_text(company_data, contacts, activities)
+            # Создаем JSON структуру для компании
+            company_json = self.build_company_json(company_data, contacts, activities)
 
-
-            # Сохраняем данные в отдельный текстовый файл для каждой компании
+            # Сохраняем данные в отдельный JSON файл для каждой компании
             try:
-                company_name = company_data['properties'].get('name', 'Без названия').replace('/', '_').replace('\\', '_')
+                company_name = company_data['properties'].get('name', 'Без названия').replace('/', '_').replace(
+                    '\\', '_')
             except Exception as e:
                 traceback.print_exc()
                 company_name = company_data['properties'].get('name', 'Без названия')
-            output_file = os.path.join(self.output_dir, f"{company_name}.txt")
+            output_file = os.path.join(self.output_dir, f"{company_name}.json")
             with open(output_file, "w", encoding="utf-8") as f:
-                f.write(company_text)
+                json.dump(company_json, f, indent=4, ensure_ascii=False)
 
             logging.info(f"Данные компании {company_name} ({company_id}) успешно сохранены в файл: {output_file}")
 
@@ -467,7 +487,7 @@ if __name__ == "__main__":
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = None
+            company_id_to_process = '18149319775'
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

@@ -121,7 +121,7 @@ def upload_data(item, filename, item_type, source_data):
         "metadata": metadata
     }
 
-    url = 'https://foodforce.tech/add_document/'
+    url = 'http://localhost:8001/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
     # Send request with retries
@@ -134,7 +134,7 @@ def upload_data(item, filename, item_type, source_data):
         logging.info(
             f"Отправка POST запроса (попытка {retries}/{max_retries}) типа {item_type} для {filename} с задержкой {delay} сек.")
         try:
-            response = requests.post(url, headers=headers, json=data_to_send, verify=False)  # Send JSON payload
+            response = requests.post(url, headers=headers, json=data_to_send)  # Send JSON payload
             response.raise_for_status()  # Raise HTTPError for bad responses
 
             logging.info(f"Данные типа {item_type} для {filename} успешно отправлены.")
@@ -162,12 +162,12 @@ def main():
     """
     Main function to iterate through files and process them.
     """
-    directory = "hubspot_company_data"
+    directory = "111"
     files = [os.path.join(directory, filename) for filename in os.listdir(directory) if filename.endswith(".json")]
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         executor.map(process_file, files)
 
     logging.info("Основной процесс завершен.")

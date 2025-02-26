@@ -31,7 +31,7 @@ from text_utils import split_text_semantically
 from transformers import pipeline, AutoTokenizer
 
 # --- Конфигурация ---
-CHROMA_DB_PATH = "chroma_db"  # Папка, где будет храниться база данных ChromaDB
+CHROMA_DB_PATH = "chroma_db"  # Папка, где будет хранится база данных ChromaDB
 TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
 SAVE_INTERVAL_SECONDS = 69  # Интервал сохранения в секундах (10 минут)
 
@@ -67,7 +67,7 @@ app = FastAPI(lifespan=lifespan)
 # --- Зависимость для аутентификации по токену ---
 async def verify_token(authorization: Optional[str] = Header(None)):
     """
-    Проверяет токен из заголовка Authorization (схема Bearer).
+    Проверяит токен из заголовка Authorization (схема Bearer).
     """
     if not authorization:
         raise HTTPException(
@@ -102,7 +102,7 @@ async def verify_token(authorization: Optional[str] = Header(None)):
 
 class AddDocumentRequest(BaseModel):
     """
-    Модель запроса для добавления документа.
+    Модель запроса для добавления дакумента.
     """
     text: str
     label: ValidLabels
@@ -114,12 +114,12 @@ class AddDocumentRequest(BaseModel):
 @app.post("/add_document/", dependencies=[Depends(verify_token)])
 async def add_document(request_data: AddDocumentRequest = Body(...)):
     """
-        Добавляет текст как документ в векторное хранилище, принимая JSON payload.
+        Добавляет текст как дакумент в векторное хранилище, принимая JSON payload.
 
         - **text**: Текст документа для добавления.
-        - **label**: Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле.
-        - **document_id**: Уникальный идентификатор документа. Если не указан, генерируется автоматически.
-        - **metadata**: Словарь с метаданными документа.  Дополнительные поля будут сохранены.
+        - **label**: Указание источника дакумента (hubspot, telegram, wiki, startrek). Обязательное поле.
+        - **document_id**: Уникальный идентификатор дакумента. Если не указан, генерируется автоматически.
+        - **metadata**: Словарь с метаданными дакумента.  Дополнительные поля будут сохранены.
     """
     try:
         text = request_data.text
@@ -131,7 +131,7 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
         document_id = document_id or f"doc_{label}_{hash(text)}"
 
         collection = get_collection(label.value)
-        # Удаляем старые чанки документа, если они есть
+        # Удаляем старые чанки дакумента, если они есть
         collection.delete(where={"source_document_id": document_id})
 
         combined_metadata = json.loads(metadata.model_dump_json())
@@ -152,7 +152,7 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
             combined_metadata["source_document_id"] = document_id  # Добавляем source_document_id
             await upsert_to_collection(collection, [text], [combined_metadata], [document_id])
 
-        return {"message": f"Документ успешно обработан и добавлен с label {label} и ID {document_id}."}
+        return {"message": f"Дакумент успешно обработан и добавлен с label {label.value} и ID {document_id}."}
 
     except Exception as e:
         traceback.print_exc()
@@ -161,7 +161,7 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
 
 async def process_results(results: List[Dict[str, Any]], label: ValidLabels, query: Query) -> List[Dict[str, Any]]:
     """
-    Обрабатывает результаты поиска, заменяя чанки целым документом, если доля чанков превышает определенный порог.
+    Обрабатывает результаты поиска, заменяя чанки целым дакументом, если доля чанков превышает определенный порог.
     """
     source_document_ids = {}
     for result in results:
@@ -238,18 +238,74 @@ def filter_context_with_local_llm(question, context):
     filtered_context = context_filter_pipeline(prompt, max_length=2048, truncation=True)[0]['generated_text']
     return filtered_context
 
+
+def get_db_connection():
+    conn = sqlite3.connect(f'{CHROMA_DB_PATH}/chroma.sqlite3')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    TODO: Where индекс хорошо бы вынести в отдельную БД
+    """
+    transformed_where = {}
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    for key, condition in where.items():
+        if isinstance(condition, dict) and "$contains" in condition:
+            search_string = condition["$contains"]
+            # Determine the column based on the data type
+            query = f"""
+                            SELECT DISTINCT
+                                CASE
+                                    WHEN string_value IS NOT NULL THEN string_value
+                                    WHEN int_value IS NOT NULL THEN int_value
+                                    WHEN float_value IS NOT NULL THEN float_value
+                                    WHEN bool_value IS NOT NULL THEN bool_value
+                                END AS value
+                            FROM embedding_metadata
+                            WHERE key = ?
+                              AND (
+                                  lower(string_value) LIKE lower(?) OR
+                                  CAST(int_value AS TEXT) LIKE lower(?) OR
+                                  CAST(float_value AS TEXT) LIKE lower(?) OR
+                                  CAST(bool_value AS TEXT) LIKE lower(?)
+                              )
+                        """
+            cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%'))
+            values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
+
+            if values:
+                transformed_where[key] = {"$in": values}
+            else:
+                # If no matching IDs are found, return an impossible condition to avoid returning all results
+                transformed_where[key] = {"$eq": "impossible_value"}  # Or some other impossible condition
+        else:
+            # Keep other conditions as they are
+            transformed_where[key] = condition
+
+    conn.close()
+    return transformed_where
+
+
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
 async def query_documents(query: Query):
-    """Выполняет поиск документов в векторном хранилище и фильтрует контекст локальной LLM."""
+    """Выполняет поиск дакументов в векторном хранилище и фильтрует контекст локальной LLM."""
     all_results = []
     for label in query.labels:  # Итерируемся по списку labels
         try:
             collection = get_collection(label.value)  # Получаем коллекцию для label
+
+            # Transform the where clause
+            transformed_where = transform_where_clause(query.where)
+
             results = collection.query(
                 query_texts=[query.text],
-                n_results=1,
-                where=query.where,  # Фильтры по метаданным
-                include=["documents", "metadatas", "distances"]  # Добавляем distances в include
+                n_results=query.n_results,
+                where=transformed_where,
+                include=["documents", "metadatas", "distances"]
             )
 
             extracted_results = []
@@ -265,6 +321,7 @@ async def query_documents(query: Query):
 
         except Exception as e:
             logging.error(f"Ошибка при запросе label {label}: {e}")  # Логируем ошибку, но продолжаем
+            traceback.print_exc()
 
     # Сортируем результаты по расстоянию (по возрастанию)
     all_results.sort(key=lambda x: x['distance'])
@@ -293,12 +350,12 @@ async def query_documents(query: Query):
 
 @app.delete("/delete_document/{document_id}/{label}", dependencies=[Depends(verify_token)])
 async def delete_document(document_id: str, label: str):
-    """Удаляет документ или фрагмент документа из векторного хранилища по ID и label."""
+    """Удаляет дакумент или фрагмент дакумента из векторного хранилища по ID и label."""
     try:
         collection = get_collection(label)  # Получаем коллекцию для label
         # !ВАЖНО: Удаляем все фрагменты, связанные с исходным document_id
         collection.delete(where={"source_document_id": document_id})
-        return {"message": f"Документ с ID {document_id} и все его фрагменты с label {label} успешно удалены"}
+        return {"message": f"Дакумент с ID {document_id} и все его фрагменты с label {label} успешно удалены"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -316,50 +373,6 @@ async def force_save_messages():
     message = await telegram_integration.save_telegram_messages_to_chromadb()
     return ForceSaveResponse(message=message)
 
-
-def get_db_connection():
-    conn = sqlite3.connect(f'{CHROMA_DB_PATH}/chroma.sqlite3')
-    conn.row_factory = sqlite3.Row
-    return conn
-# Определите функцию для получения уникальных партнеров прямо из базы данных
-def find_partner_strings(search_string):
-    """
-    Ищет вхождения строки в столбце string_value таблицы embedding_metadata,
-    где key = 'partner', без учета регистра.
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    query = """
-    SELECT DISTINCT string_value
-    FROM embedding_metadata
-    WHERE key = 'partner'
-      AND lower(string_value) LIKE lower(?)
-    """
-
-    cursor.execute(query, ('%' + search_string + '%',))  # Используем параметризацию для безопасности
-
-    results = cursor.fetchall()
-    conn.close()
-    return results
-
-@app.get("/unique_partners/{label}", dependencies=[Depends(verify_token)])
-async def endpoint_get_unique_partners(label: ValidLabels, prefix: Optional[str] = None):
-    """
-    Возвращает список уникальных значений поля "partner" из метаданных документов указанной коллекции (label),
-    используя прямой SQL-запрос к таблице embedding_metadata.
-    Можно указать префикс для фильтрации значений.
-    """
-    try:
-        partners = find_partner_strings(prefix)
-        return {"partners": partners}
-    except Exception as e:
-        #  Обработайте исключения, например, логирование и возврат ошибки
-        print(f"Ошибка при выполнении запроса к базе данных: {e}")
-        return {"error": "Произошла ошибка при получении партнеров"} # Верните более информативное сообщение об ошибке
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Signal Handling and atexit ---
@@ -380,7 +393,7 @@ def register_signal_handlers():
         try:
             await telegram_integration.sync_save_all_telegram_messages_to_files()  # Save data before exiting
             await telegram_integration.save_telegram_messages_to_chromadb()
-            logging.info("Data saved successfully.")
+            logging.info("Data saved successfully.");
         except Exception as e:
             logging.error(f"Error saving data during shutdown: {e}")
             traceback.print_exc()

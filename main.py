@@ -152,10 +152,12 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
         if request_data.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false
             # Разбиваем на чанки
             chunks = await split_text_semantically(text)
+            meta_end_text = '[META: ' + ','.join([f'{k}: {v}' for k, v in combined_metadata.items()]) + ']'
             chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
 
             metadatas = []
             for i in range(len(chunks)):
+                chunks[i] = chunks[i] + '\n' + meta_end_text
                 chunk_metadata = combined_metadata
                 chunk_metadata["source_document_id"] = document_id
                 metadatas.append(chunk_metadata)

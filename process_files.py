@@ -111,15 +111,15 @@ def upload_data(item, filename, item_type, source_data):
     metadata['id'] = document_id
     metadata['type'] = item['type']
 
-    meta_end_text = '[META: '+ ','.join([f'{k}: {v}' for k,v in metadata.items()])+ ']'
+
 
     data_to_send = {
-        "text": '\n'.join([f'{k}: {v}' for k,v in item.items()]) + '\n' + meta_end_text,  # The entire item data as a JSON string
+        "text": '\n'.join([f'{k}: {v}' for k,v in item.items()]), # The entire item data as a JSON string
         "label": "hubspot",
         "document_id": document_id,
         "author": "system",
         "type": item_type,
-        "chunk": False,
+        "chunk": True,
         "metadata": metadata
     }
 

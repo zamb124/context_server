@@ -1,35 +1,46 @@
 # --- START OF FILE main.py ---
 # --- Дополнительные библиотеки ---
 import asyncio
-import io
 import json
 import logging
+import os
 import signal
 import sqlite3
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from typing import Dict, Optional, Any, Tuple, List
+from typing import Dict, Optional, Any, List
 
+import nltk
+
+nltk.download('bcp47')
 from pydantic import BaseModel
 
-from chromadb_utils import client
 import uvicorn
-from chromadb import PersistentClient
-from fastapi import FastAPI, HTTPException, Header, status, UploadFile, File, Query as FastAPIQuery, Request, Body, Depends
+from fastapi import FastAPI, HTTPException, Header, status, Body, \
+    Depends
 
 from chromadb_utils import get_collection, upsert_to_collection
 from config import config  # Убедитесь, что config.py содержит CHAT_TOKEN и TELEGRAM_BOT_TOKEN
-from file_utils import extract_text_from_pdf, extract_text_from_txt, extract_text_from_docx, \
-    extract_text_from_json, extract_text_from_xlsx
 from models import ValidLabels, DocumentBase, Query, ContextResponse, ForceSaveResponse
 # Import the new module
 from telegram_integration import telegram_integration
 from text_utils import split_text_semantically
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # --- Импорт Transformers и Pipeline ---
-from transformers import pipeline, AutoTokenizer
+from transformers import pipeline
+import nltk
+import ssl
 
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+nltk.download('bcp47')
 # --- Конфигурация ---
 CHROMA_DB_PATH = "chroma_db"  # Папка, где будет хранится база данных ChromaDB
 TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
@@ -47,6 +58,7 @@ if not TELEGRAM_BOT_TOKEN:
 # --- Инициализация логирования ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 # --- FastAPI App ---
 @asynccontextmanager
@@ -111,6 +123,7 @@ class AddDocumentRequest(BaseModel):
     chunk: Optional[bool] = True
     author: Optional[str] = None
 
+
 @app.post("/add_document/", dependencies=[Depends(verify_token)])
 async def add_document(request_data: AddDocumentRequest = Body(...)):
     """
@@ -159,52 +172,6 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def process_results(results: List[Dict[str, Any]], label: ValidLabels, query: Query) -> List[Dict[str, Any]]:
-    """
-    Обрабатывает результаты поиска, заменяя чанки целым дакументом, если доля чанков превышает определенный порог.
-    """
-    source_document_ids = {}
-    for result in results:
-        source_document_id = result['metadata'].get('source_document_id')
-        if source_document_id:
-            source_document_ids[source_document_id] = source_document_ids.get(source_document_id, 0) + 1
-
-    for source_document_id, count in source_document_ids.items():
-        if count > 5:
-            # Remove the chunks from results
-            results = [result for result in results if result['metadata'].get('source_document_id') != source_document_id]
-
-            # Fetch the entire document by source_document_id
-            collection = get_collection(label.value)
-            full_document_results = collection.get(
-                where={"source_document_id": source_document_id},
-                include=["documents", "metadatas"]
-            )
-
-            if full_document_results and full_document_results['documents']:
-                # Create result entries for each document found
-                for i in range(len(full_document_results['ids'])):
-                    results.append({
-                        'id': full_document_results['ids'][i],
-                        'document': full_document_results['documents'][i],
-                        'metadata': full_document_results['metadatas'][i],
-                        'distance': None,  # Distance not applicable for full documents
-                        'label': label
-                    })
-            break  # Only process one document at a time
-
-    return results
-
-
-# # --- Инициализация pipeline для фильтрации контекста (ВЫНЕСТИ ЗА ПРЕДЕЛЫ ФУНКЦИИ, ЧТОБЫ НЕ ПЕРЕИНИЦИАЛИЗИРОВАТЬ КАЖДЫЙ РАЗ) ---
-# try:
-#     context_filter_pipeline = pipeline("text2text-generation", model="facebook/bart-base", device="cuda:0")
-#     print("BART-base loaded successfully with CUDA")
-# except Exception as e:
-#     print(f"Error loading BART-base with CUDA: {e}")
-#     context_filter_pipeline = pipeline("text2text-generation", model="facebook/bart-base", device="cpu")
-#     print("BART-base loaded successfully on CPU")
-
 def create_prompt(question, context):
     """Создает prompt для фильтрации контекста."""
     prompt = f"""
@@ -218,25 +185,26 @@ def create_prompt(question, context):
     return prompt
 
 
-def filter_context_with_local_llm(question, context):
-    max_context_length = 2048
-    if len(context) > max_context_length:
-        context = context[:max_context_length]
-    prompt = create_prompt(question, context)
+# --- New endpoint for context compression ---
+class CompressContextRequest(BaseModel):
+    question: str
+    context: str
 
-    tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base", model_max_length=2048) # Ensure correct tokenizer
 
-    # Tokenize the prompt and check token IDs
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-    input_ids = inputs["input_ids"][0]
-    vocab_size = tokenizer.vocab_size
-    for token_id in input_ids:
-        if token_id >= vocab_size:
-            print(f"Error: Token ID {token_id} is out of vocabulary range (0-{vocab_size-1})")
-            return ""  # or handle the error in another way
+class CompressContextResponse(BaseModel):
+    compressed_context: str
 
-    filtered_context = context_filter_pipeline(prompt, max_length=2048, truncation=True)[0]['generated_text']
-    return filtered_context
+
+def chunk_text(text: str, max_words: int = 350) -> List[str]:
+    """Splits the text into chunks of maximum words."""
+    words = text.split()
+    chunks = []
+    start = 0
+    while start < len(words):
+        end = min(start + max_words, len(words))
+        chunks.append(" ".join(words[start:end]))
+        start = end
+    return chunks
 
 
 def get_db_connection():
@@ -274,7 +242,8 @@ def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
                                   CAST(bool_value AS TEXT) LIKE lower(?)
                               )
                         """
-            cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%'))
+            cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%',
+                                   '%' + search_string + '%'))
             values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
 
             if values:
@@ -288,6 +257,42 @@ def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
 
     conn.close()
     return transformed_where
+
+
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+
+async def filter_context_with_summarization(question: str, context: str) -> str:
+    """
+    Фильтрует контекст, генерируя краткое резюме, отвечающее на вопрос.
+    """
+    # Скомбинируйте вопрос и контекст для подачи в модель
+    input_text = f"###leave contact information, phone, email if available.\n Question: {question} Context: {context}"
+
+    # Calculate max_length dynamically
+    input_length = len(input_text.split())  # Approximate word count
+    max_length = min(int(input_length * 0.5), 2000)  # Set max_length to half the input length, but no more than 2000
+    min_length = min(30, int(input_length * 0.1))  # Ensure min_length is not greater than 30 or 10% of input length
+
+    # Важно: использовать модель асинхронно, если это возможно.  В данном случае pipeline не асинхронный,
+    # поэтому мы используем asyncio.to_thread, чтобы запустить его в отдельном потоке.
+    summary = await asyncio.to_thread(
+        summarizer, input_text,
+        max_length=max_length,
+        min_length=min_length,
+        do_sample=False
+    )
+
+    return summary[0]['summary_text']
+
+
+async def parallel_summarize(question: str, contexts: List[str]) -> List[str]:
+    """
+    Параллельно фильтрует список контекстов, используя asyncio.gather.
+    """
+    tasks = [filter_context_with_summarization(question, context) for context in contexts]
+    filtered_results = await asyncio.gather(*tasks)
+    return filtered_results
 
 
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
@@ -325,27 +330,22 @@ async def query_documents(query: Query):
 
     # Сортируем результаты по расстоянию (по возрастанию)
     all_results.sort(key=lambda x: x['distance'])
-
-    # Concatenate documents from all results into a single context string
-    context = "\n".join([result['document'] for result in all_results])
-
-    # Filter the context with the local LLM
-    #filtered_context = filter_context_with_local_llm(query.text, context)
-
-    # gpt_response = await call_expensive_gpt(query.text, filtered_context)
-
-    # Создаем результат с отфильтрованным контекстом
-    # filtered_result = {
-    #     'id': 'filtered_context',
-    #     'document': filtered_context,
-    #     'metadata': {},
-    #     'distance': 0,
-    #     'label': 'filtered'
-    # }
+    all_results = [i['document'] for i in all_results if i['distance'] < 10]  # Фильтруем по максимальному расстоянию
+    if query.summarize:
+        # Параллельная фильтрация контекста
+        all_results = await parallel_summarize(query.text, all_results)
 
     # Возвращаем только отфильтрованный контекст
     return ContextResponse(results=all_results)
 
+
+@app.post("/summarize_context", response_model=CompressContextResponse, dependencies=[Depends(verify_token)])
+async def summarize_context_endpoint(request: CompressContextRequest):
+    """Compresses the given context based on the question using a summarization model.
+    Splits the context into chunks suitable for the summarization model.
+    """
+    compress_context_done = await filter_context_with_summarization(request.question, request.context)
+    return await CompressContextResponse(compressed_context=compress_context_done)
 
 
 @app.delete("/delete_document/{document_id}/{label}", dependencies=[Depends(verify_token)])
@@ -372,7 +372,6 @@ async def force_save_messages():
     """
     message = await telegram_integration.save_telegram_messages_to_chromadb()
     return ForceSaveResponse(message=message)
-
 
 
 # --- Signal Handling and atexit ---

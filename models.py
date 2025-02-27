@@ -75,6 +75,7 @@ class DocumentBase(BaseMetadata):
 
 class Query(BaseModel):
     text: str = Field(..., description="Вопрос или запрос данных", min_length=1)
+    summarize: bool = Field(default=False, description="Флаг суммаризации, если нужно ")
     labels: List[ValidLabels] = Field(
         description="Указать доступные коллекции где производить поиск")  # Обязательный атрибут labels
     n_results: int = Field(default=5, ge=1, le=300, description="Количество результатов для возврата")
@@ -82,7 +83,7 @@ class Query(BaseModel):
 
 
 class ContextResponse(BaseModel):
-    results: List[Dict]
+    results: List[str]
 
 
 class ForceSaveResponse(BaseModel):

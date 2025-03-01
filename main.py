@@ -372,13 +372,40 @@ async def query_documents(query: Query):
 
     # Сортируем результаты по расстоянию (по возрастанию)
     all_results.sort(key=lambda x: x['distance'])
-    all_results = [i['document'] for i in all_results if i['distance'] < 10]  # Фильтруем по максимальному расстоянию
+
+    # Group chunks by source_document_id and combine them
+    grouped_results = {}
+    for item in all_results:
+        if item['distance'] < 10: # Фильтруем по максимальному расстоянию
+            source_document_id = item['metadata']['source_document_id']
+            if source_document_id not in grouped_results:
+                grouped_results[source_document_id] = {
+                    'document': '',
+                    'metadata': item['metadata'],
+                    'label': item['label'],
+                    'chunks': []  # List to store chunks in order
+                }
+            grouped_results[source_document_id]['chunks'].append(item)
+
+    # Sort chunks within each group by their ID postfix (e.g., _0, _1, _2)
+    for source_document_id, group_data in grouped_results.items():
+        group_data['chunks'].sort(key=lambda x: int(x['id'].split('_')[-1]))  # Extract and sort by the number after the last underscore
+
+    # Combine the sorted chunks into a single document
+    combined_documents = []
+    for source_document_id, group_data in grouped_results.items():
+        combined_document = ''
+        for chunk in group_data['chunks']:
+            combined_document += chunk['document'] + '\n'
+        combined_documents.append(combined_document)
+
+
     if query.summarize:
         # Параллельная фильтрация контекста
-        all_results = await parallel_summarize(query.text, all_results)
+        combined_documents = await parallel_summarize(query.text, combined_documents)
 
     # Возвращаем только отфильтрованный контекст
-    return ContextResponse(results=all_results)
+    return ContextResponse(results=combined_documents)
 
 
 @app.post("/summarize_context", response_model=CompressContextResponse, dependencies=[Depends(verify_token)])

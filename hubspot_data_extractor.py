@@ -173,7 +173,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         Извлекает исчерпывающие данные для одной компании, включая связанные контакты и действия.
         """
         company_properties = ["name", "domain", "industry", "phone", "website", "description", "contacts",
-                              "activites", "deals", "geography", "country", "city"]  # Добавлено описание
+                              "activites", "deals", "geography", "country", "city","hs_timestamp"]  # Добавлено описание
         # Изменяем вызов fetch_all, чтобы вернуть только одну компанию по ID
         url = f"{self.BASE_URL}/companies/{company_id}"
         params = {"properties": ",".join(company_properties),
@@ -196,7 +196,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         for contact_id in contacts_ids:
             try:
                 url = f"{self.BASE_URL}/contacts/{contact_id}"
-                params = {"properties": "firstname,lastname,email,phone,jobtitle"}
+                params = {"properties": "firstname,lastname,email,phone,jobtitle,hs_timestamp"}
                 data = await self._fetch_data(url, params=params)
 
                 if data:
@@ -375,6 +375,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         """
         company_json = {
             "city": company_data["properties"].get("city", ""),
+            "create_date": company_data["properties"].get('createdate', ""),
             "country": company_data["properties"].get("country", ""),
             "name": company_data["properties"].get("name", "No Name"),
             "industry": company_data["properties"].get("industry", ""),
@@ -394,6 +395,7 @@ class HubSpotDataExtractor:  # Переименованный класс для 
         for contact in contacts:
             contact_data = {
                 "name": f"{contact['properties'].get('firstname', '')} {contact['properties'].get('lastname', '')}",
+                "create_date": company_data["properties"].get('createdate', ""),
                 "job_title": contact['properties'].get('jobtitle', ''),
                 "email": contact['properties'].get('email', ''),
                 "phone": contact['properties'].get('phone', ''),
@@ -486,11 +488,11 @@ if __name__ == "__main__":
     async def main():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         access_token = config.HUBSPOT_API_KEY  # Замените своим фактическим токеном доступа.
-        output_directory = "hubspot_company_data"  # Каталог для хранения файлов компаний
+        output_directory = "111"  # Каталог для хранения файлов компаний
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = None
+            company_id_to_process = '19387888471'
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

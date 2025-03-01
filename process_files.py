@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -5,15 +6,24 @@ import re
 import time
 import concurrent.futures
 import traceback
+from datetime import datetime
 
 import requests
-
+from fireflies_client import fireflies_api
 from config import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
+def check_recording(item):
+    pattern = r"https:\/\/app\.fireflies\.ai\/view\/[\w-]+::[\w]+"
+    text = json.dumps(item)
+    matches = re.findall(pattern, text)
+    if matches:
+        return matches
+    else:
+        print("Ссылки не найдены")
 
 def clean_text(text):
     """Removes all characters except letters and numbers from the text."""
@@ -63,7 +73,7 @@ def process_file(filepath):
     # Process contacts
     if 'contacts' in data and isinstance(data['contacts'], list):
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            executor.map(lambda contact: upload_data(contact, filename, 'contact', data), data['contacts'])
+                executor.map(lambda contact: upload_data(contact, filename, 'contact', data), data['contacts'])
 
     # Process notes
     if 'notes' in data and isinstance(data['notes'], list):
@@ -79,6 +89,10 @@ def process_file(filepath):
     if 'calls' in data and isinstance(data['calls'], list):
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             executor.map(lambda call: upload_data(call, filename, 'call', data), data['calls'])
+
+    if 'meetings' in data and isinstance(data['meetings'], list):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(lambda call: upload_data(call, filename, 'meetings', data), data['meetings'])
 
     logging.info(f"Файл {filepath} успешно обработан.")
 
@@ -110,8 +124,7 @@ def upload_data(item, filename, item_type, source_data):
     metadata['partner_search'] = clean_text(filename.lower())
     metadata['id'] = document_id
     metadata['type'] = item['type']
-
-
+    metadata['create_date'] = datetime.fromisoformat(item.get('create_date', '2021-01-01T00:00:00.000Z')).timestamp()
 
     data_to_send = {
         "text": '\n'.join([f'{k}: {v}' for k,v in item.items()]), # The entire item data as a JSON string
@@ -122,8 +135,19 @@ def upload_data(item, filename, item_type, source_data):
         "chunk": True,
         "metadata": metadata
     }
-
-    url = 'https://foodforce.tech/add_document/'
+    recodings = check_recording(data_to_send)
+    if recodings:
+        for rec in recodings:
+            transcript = asyncio.run(fireflies_api.get_transcript(rec))
+            summary = transcript['summary']
+            text = f"\n\nACTION ITEMS: {summary['action_items']}\n\n"
+            text += f"SHORTHAND BULLET: {summary['shorthand_bullet']}\n\n"
+            text += f"OVERVIEW: {summary['overview']}\n\n"
+            text += f"BULLET GIST: {summary['bullet_gist']}\n\n"
+            text += f"GIST: {summary['gist']}\n\n"
+            text += f"SHORT OVERVIEW: {summary['short_overview']}\n\n"
+            data_to_send['text'] += text
+    url = 'http://localhost:8001/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
     # Send request with retries
@@ -164,7 +188,7 @@ def main():
     """
     Main function to iterate through files and process them.
     """
-    directory = "hubspot_company_data"
+    directory = "111"
     files = [os.path.join(directory, filename) for filename in os.listdir(directory) if filename.endswith(".json")]
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")

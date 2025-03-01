@@ -147,7 +147,9 @@ def upload_data(item, filename, item_type, source_data):
             text += f"GIST: {summary['gist']}\n\n"
             text += f"SHORT OVERVIEW: {summary['short_overview']}\n\n"
             data_to_send['text'] += text
-    url = 'http://localhost:8001/add_document/'
+
+
+    url = 'https://foodforce.tech/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
     # Send request with retries

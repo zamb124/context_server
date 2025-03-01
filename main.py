@@ -443,6 +443,17 @@ async def force_save_messages():
     return ForceSaveResponse(message=message)
 
 
+@app.post("/hubspot")
+async def hubspot_webhook(request_data: dict = Body(...)):
+    """
+    Endpoint to receive webhooks from HubSpot.
+    Logs the entire payload for inspection.
+    """
+    logging.info("Received HubSpot webhook payload:")
+    logging.info(json.dumps(request_data, indent=2))  # Log the payload with pretty printing
+    return {"message": "HubSpot webhook received and logged successfully."}
+
+
 # --- Signal Handling and atexit ---
 async def handle_exit():
     logging.info("Завершение работы: сохранение данных...")

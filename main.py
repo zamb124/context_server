@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, Optional, Any, List
 
 import nltk
+from starlette.requests import Request
 
 nltk.download('bcp47')
 from pydantic import BaseModel
@@ -444,13 +445,17 @@ async def force_save_messages():
 
 
 @app.post("/hubspot")
-async def hubspot_webhook(request_data: dict = Body(...)):
+async def hubspot_webhook(request: Request):
     """
     Endpoint to receive webhooks from HubSpot.
     Logs the entire payload for inspection.
     """
     logging.info("Received HubSpot webhook payload:")
-    logging.info(json.dumps(request_data, indent=2))  # Log the payload with pretty printing
+    try:
+        data = await request.json()
+    except Exception:
+        data = request.json()
+    logging.info(json.dumps(data, indent=2))  # Log the payload with pretty printing
     return {"message": "HubSpot webhook received and logged successfully."}
 
 

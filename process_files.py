@@ -123,7 +123,7 @@ def upload_data(item, filename, item_type, source_data):
         "metadata": metadata
     }
 
-    url = 'http://localhost:8001/add_document/'
+    url = 'https://foodforce.tech/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
     # Send request with retries
@@ -164,7 +164,7 @@ def main():
     """
     Main function to iterate through files and process them.
     """
-    directory = "111"
+    directory = "hubspot_company_data"
     files = [os.path.join(directory, filename) for filename in os.listdir(directory) if filename.endswith(".json")]
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")

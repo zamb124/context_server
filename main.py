@@ -217,48 +217,88 @@ def get_db_connection():
 
 def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
     """
-    TODO: Where индекс хорошо бы вынести в отдельную БД
+    Преобразует операторы $contains в $in рекурсивно, обрабатывая $and и $or.
+    Удаляет "impossible_value" и упрощает $and, если это необходимо.
+    Если в where больше 1 параметра, оборачивает их в $and.
     """
-    transformed_where = {}
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    for key, condition in where.items():
-        if isinstance(condition, dict) and "$contains" in condition:
-            search_string = condition["$contains"]
-            # Determine the column based on the data type
-            query = f"""
-                            SELECT DISTINCT
-                                CASE
-                                    WHEN string_value IS NOT NULL THEN string_value
-                                    WHEN int_value IS NOT NULL THEN int_value
-                                    WHEN float_value IS NOT NULL THEN float_value
-                                    WHEN bool_value IS NOT NULL THEN bool_value
-                                END AS value
-                            FROM embedding_metadata
-                            WHERE key = ?
-                              AND (
-                                  lower(string_value) LIKE lower(?) OR
-                                  CAST(int_value AS TEXT) LIKE lower(?) OR
-                                  CAST(float_value AS TEXT) LIKE lower(?) OR
-                                  CAST(bool_value AS TEXT) LIKE lower(?)
-                              )
-                        """
-            cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%',
-                                   '%' + search_string + '%'))
-            values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
+    def transform_recursive(condition: Any) -> Any:
+        if isinstance(condition, dict):
+            new_condition = {}
+            for key, value in condition.items():
+                if isinstance(value, dict) and "$contains" in value:
+                    # Обрабатываем $contains
+                    search_string = value["$contains"]
+                    transformed_value = process_contains(key, search_string)
+                    if transformed_value != {"$eq": "impossible_value"}:
+                        new_condition[key] = transformed_value
+                elif key in ("$and", "$or"):
+                    # Рекурсивно обрабатываем $and и $or
+                    transformed_list = [transform_recursive(item) for item in value]
+                    # Фильтруем "impossible_value" из списков $and и $or
+                    filtered_list = [item for item in transformed_list if item]  # Пустые словари считаются False
+                    if filtered_list:
+                        new_condition[key] = filtered_list
+                else:
+                    # Рекурсивно обрабатываем другие ключи
+                    new_condition[key] = transform_recursive(value)
 
-            if values:
-                transformed_where[key] = {"$in": values}
+            # Упрощаем $and, если в нем остался только один элемент
+            if "$and" in new_condition and len(new_condition["$and"]) == 1:
+                return new_condition["$and"][0]
+            elif not new_condition:
+                # Если словарь пустой, возвращаем None, чтобы его можно было отфильтровать
+                return None
             else:
-                # If no matching IDs are found, return an impossible condition to avoid returning all results
-                transformed_where[key] = {"$eq": "impossible_value"}  # Or some other impossible condition
+                return new_condition
         else:
-            # Keep other conditions as they are
-            transformed_where[key] = condition
+            # Возвращаем значение как есть, если это не словарь
+            return condition
 
-    conn.close()
-    return transformed_where
+    def process_contains(key: str, search_string: str) -> Dict[str, Any]:
+        """
+        Выполняет поиск в базе данных и возвращает условие $in.
+        """
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = f"""
+            SELECT DISTINCT
+                CASE
+                    WHEN string_value IS NOT NULL THEN string_value
+                    WHEN int_value IS NOT NULL THEN int_value
+                    WHEN float_value IS NOT NULL THEN float_value
+                    WHEN bool_value IS NOT NULL THEN bool_value
+                END AS value
+            FROM embedding_metadata
+            WHERE key = ?
+              AND (
+                  lower(string_value) LIKE lower(?) OR
+                  CAST(int_value AS TEXT) LIKE lower(?) OR
+                  CAST(float_value AS TEXT) LIKE lower(?) OR
+                  CAST(bool_value AS TEXT) LIKE lower(?)
+              )
+        """
+        cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%',
+                               '%' + search_string + '%'))
+        values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
+
+        conn.close()
+
+        if values:
+            return {"$in": values}
+        else:
+            # Если ничего не найдено, возвращаем невозможное условие
+            return {"$eq": "impossible_value"}
+
+    if len(where) > 1 and "$and" not in where and "$or" not in where:
+        # Оборачиваем условия в $and
+        transformed_where = transform_recursive({'$and': [ {k: v} for k, v in where.items()]})
+    else:
+        transformed_where = transform_recursive(where)
+
+    # Если верхний уровень стал None, возвращаем пустой словарь
+    return transformed_where if transformed_where else {}
 
 
 summarizer = pipeline("summarization", model="facebook/bart-large-cnn")

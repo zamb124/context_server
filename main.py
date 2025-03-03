@@ -45,7 +45,7 @@ nltk.download('bcp47')
 # --- Конфигурация ---
 CHROMA_DB_PATH = "chroma_db"  # Папка, где будет хранится база данных ChromaDB
 TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
-SAVE_INTERVAL_SECONDS = 69  # Интервал сохранения в секундах (10 минут)
+SAVE_INTERVAL_SECONDS = 600  # Интервал сохранения в секундах (10 минут)
 
 # --- Токен авторизации ---
 CHAT_TOKEN = config.CHAT_TOKEN

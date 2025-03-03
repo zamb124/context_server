@@ -190,7 +190,7 @@ def main():
     """
     Main function to iterate through files and process them.
     """
-    directory = "111"
+    directory = "hubspot_company_data"
     files = [os.path.join(directory, filename) for filename in os.listdir(directory) if filename.endswith(".json")]
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")

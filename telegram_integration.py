@@ -209,7 +209,7 @@ class TelegramIntegration:
 
 
                         except Exception as e:
-                            logging.error(f"Error saving conversation {conversation_id} to ChromaDB: {e}")
+                            logging.error(f"Error saving conversation {conversation_id} to ChromaDB: {e}\n {validated_metadata.model_dump_json()}")
                             traceback.print_exc()
 
                         if not conversations:

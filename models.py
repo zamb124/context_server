@@ -30,7 +30,9 @@ class DocumentType(Enum):
 class BaseMetadata(BaseModel):
     type: DocumentType
     author: str
-    partner: str = ''  # default = False
+    partner: str = ''
+    create_date: float
+    partner_search: str = ''
     chunk: bool = True  # default = True
     category: Category = Field(description="Категория к какому разделу относится например это данные sales команды ")
     country: str = ''  # default = False
@@ -53,9 +55,9 @@ class ValidatedTelegramMetadata(BaseMetadata):
     chat: str
     chat_id: str
     origin_conversation_id: str
-    date: str
-    deal_id: Optional[str]
-    deal_title: Optional[str]
+    create_date: str
+    deal_id: Optional[str] = ''
+    deal_title: Optional[str] = ''
     company_id: Optional[str]
     type: DocumentType = DocumentType.TELEGRAMM_MESSAGE
     category: Category = Category.SALES

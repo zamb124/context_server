@@ -184,7 +184,7 @@ class TelegramIntegration:
                                 "chat": chat_title,
                                 "chat_id": conversation_id.split(":")[-2],
                                 "origin_conversation_id": conversation_id,
-                                "date": date_str,
+                                "create_date": datetime.fromisoformat(date_str).timestamp(),
                                 "author": conversation.get("author", {}).get("username"),
                                 "deal_id": conversation.get("deal_id"),
                                 "deal_title": conversation.get("deal_title"),

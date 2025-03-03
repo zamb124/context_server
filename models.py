@@ -55,7 +55,7 @@ class ValidatedTelegramMetadata(BaseMetadata):
     chat: str
     chat_id: str
     origin_conversation_id: str
-    create_date: str
+    create_date: float
     deal_id: Optional[str] = ''
     deal_title: Optional[str] = ''
     company_id: Optional[str]

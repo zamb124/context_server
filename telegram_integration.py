@@ -28,6 +28,10 @@ daily_conversations: Dict[str, Dict[str, Dict[str, Dict]]] = {}
 deal_cache = {}  # Initialize the deal cache
 
 
+def clean_text(text):
+    """Removes all characters except letters and numbers from the text."""
+    return re.sub(r'[^a-zA-Z0-9]', '', text)
+
 class TelegramIntegration:
     def __init__(self):
         self.is_running = False
@@ -141,6 +145,7 @@ class TelegramIntegration:
             traceback.print_exc()
             return None
 
+
     async def save_telegram_messages_to_chromadb(self):
         """Saves structured Telegram messages to ChromaDB, filtering by date."""
         global daily_conversations
@@ -185,6 +190,7 @@ class TelegramIntegration:
                                 "deal_title": conversation.get("deal_title"),
                                 "company_id": conversation.get("company_id", ''),
                                 "partner": conversation.get("partner", ''),
+                                "partner_search": clean_text(conversation.get("partner", '')).lower(),
                                 "chunk": True,  # Обязательное поле, значение по умолчанию
                                 "category": "sales",  # Обязательное поле, значение по умолчанию
                                 "country": ''  # Обязательное поле, значение по умолчанию

@@ -28,6 +28,7 @@ daily_conversations: Dict[str, Dict[str, Dict[str, Dict]]] = {}
 deal_cache = {}  # Initialize the deal cache
 
 
+
 def clean_text(text):
     """Removes all characters except letters and numbers from the text."""
     return re.sub(r'[^a-zA-Z0-9]', '', text)
@@ -179,7 +180,38 @@ class TelegramIntegration:
                                     logging.error(f"Ошибка при проверке ID {document_id}:{check_error}")
                                     traceback.print_exc()
                                     break  # Прерываем цикл, чтобы избежать бесконечного повторения
+
+                            deail_id = None
                             # Создаем словарь для метаданных
+                            if not conversation.get("deal_id"):
+                                chat_details = await self.get_chat_details(conversation_id.split(":")[-2])
+                                chat_title = chat_details.get("title",
+                                                              f"ChatID_{conversation_id.split(":")[-2]}") if chat_details else f"ChatID_{conversation_id.split(":")[-2]}"
+                                chat_description = chat_details.get("description", "") if chat_details else ""
+
+                                # Extract deal ID from chat title or description
+                                deal_id = None
+                                match = re.search(r"(\d{11})", chat_title + chat_description)
+                                if match:
+                                    deal_id = match.group(1)
+                                deal_data = await self.get_deal_from_hubspot(deal_id)
+                                if deal_data:
+                                    deal_title = deal_data["properties"].get("dealname")
+                                    company_ids = list(
+                                        set([i['id'] for i in deal_data['associations']['companies']['results']]))
+                                    if company_ids and len(company_ids) > 0:
+                                        company_id = company_ids[0]  # Assuming one company for deal
+                                        company_data = await self.get_company_from_hubspot(company_id)
+                                        if company_data:
+                                            partner = company_data["properties"].get("name")
+
+                                    # Store in cache
+                                    deal_cache[deal_id] = {
+                                        "deal_title": deal_title,
+                                        "company_id": company_id,
+                                        "partner": partner
+                                    }
+
                             metadata_dict = {
                                 "chat": chat_title,
                                 "chat_id": conversation_id.split(":")[-2],
@@ -195,6 +227,15 @@ class TelegramIntegration:
                                 "category": "sales",  # Обязательное поле, значение по умолчанию
                                 "country": ''  # Обязательное поле, значение по умолчанию
                             }
+                            if deal_id:
+                                metadata_dict.update(
+                                    {
+                                        "deal_id": deal_id,
+                                        "deal_title": deal_title,
+                                        "company_id": company_id,
+                                        "partner": partner
+                                    }
+                                )
                             # Валидируем метаданные с помощью Pydantic Model
                             validated_metadata = ValidatedTelegramMetadata(**metadata_dict)
                             collection.upsert(

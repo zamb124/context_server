@@ -181,7 +181,7 @@ class TelegramIntegration:
                                     traceback.print_exc()
                                     break  # Прерываем цикл, чтобы избежать бесконечного повторения
 
-                            deail_id = None
+                            deal_id = None
                             # Создаем словарь для метаданных
                             if not conversation.get("deal_id"):
                                 chat_details = await self.get_chat_details(conversation_id.split(":")[-2])

@@ -204,7 +204,7 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
 
 # --- New endpoint for context compression ---
 class CompressContextRequest(BaseModel):
-    question = str = ''
+    question:str = ''
     contexts: list
 
 

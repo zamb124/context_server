@@ -1,38 +1,28 @@
-# --- START OF FILE main.py ---
-# --- Дополнительные библиотеки ---
 import asyncio
 import json
 import logging
 import os
+import random
 import signal
 import sqlite3
+import ssl
 import sys
 import traceback
 from contextlib import asynccontextmanager
+
+import torch
+import torch.multiprocessing as mp
+
+torch.set_default_device('cpu')  # Установить CPU как устройство по умолчанию
 from typing import Dict, Optional, Any, List
 
+import fasttext
 import nltk
-from starlette.requests import Request
-
-nltk.download('bcp47')
-from pydantic import BaseModel
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header, status, Body, \
-    Depends
-
-from chromadb_utils import get_collection, upsert_to_collection
-from config import config  # Убедитесь, что config.py содержит CHAT_TOKEN и TELEGRAM_BOT_TOKEN
-from models import ValidLabels, DocumentBase, Query, ContextResponse, ForceSaveResponse
-# Import the new module
-from telegram_integration import telegram_integration
-from text_utils import split_text_semantically
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-# --- Импорт Transformers и Pipeline ---
-from transformers import pipeline
-import nltk
-import ssl
+from fastapi import FastAPI, HTTPException, Header, status, Body, Depends
+from pydantic import BaseModel
+from starlette.requests import Request
 
 try:
     _create_unverified_https_context = ssl._create_unverified_context
@@ -40,12 +30,23 @@ except AttributeError:
     pass
 else:
     ssl._create_default_https_context = _create_unverified_https_context
+nltk.download('bcp47', quiet=True)
+nltk.download('stopwords')
+nltk.download('punkt_tab')
+from transformers import pipeline
 
-nltk.download('bcp47')
+from chromadb_utils import get_collection, upsert_to_collection
+from config import config
+from models import ValidLabels, DocumentBase, Query, ContextResponse, ForceSaveResponse
+from telegram_integration import telegram_integration
+from text_utils import split_text_semantically, split_text_semantically_sync
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Установить параллелизм для токенизаторов
+
 # --- Конфигурация ---
-CHROMA_DB_PATH = "chroma_db"  # Папка, где будет хранится база данных ChromaDB
-TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
-SAVE_INTERVAL_SECONDS = 600  # Интервал сохранения в секундах (10 минут)
+CHROMA_DB_PATH = "chroma_db"
+TEMP_STORAGE_PATH = "temp_telegram_data"
+SAVE_INTERVAL_SECONDS = 600
 
 # --- Токен авторизации ---
 CHAT_TOKEN = config.CHAT_TOKEN
@@ -60,6 +61,32 @@ if not TELEGRAM_BOT_TOKEN:
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
+# --- Загрузка моделей ---
+fasttext_model_path = "lid.176.bin"
+lang_model = fasttext.load_model(fasttext_model_path)
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+nltk.data.path.append('nltk')
+try:
+    stop_words = set(stopwords.words('english'))  # Или 'english'
+except LookupError:
+    nltk.download('stopwords')
+    stop_words = set(stopwords.words('english'))  # Или 'english'
+
+
+# Создаем pipeline summarization один раз, глобально.  Важно!
+# summarizer_en = pipeline("summarization", model="facebook/bart-large-cnn")
+# summarizer_en = pipeline("text2text-generation", model="google/flan-t5-large")
+
+# summarizer_ru = pipeline("text2text-generation", model="sberbank-ai/ruT5-large")  # Пока не используется
+
+# summarizers = {
+# 'en': summarizer_en,
+# 'ru': summarizer_ru  # Пока используем en для ru
+# }
+
 
 # --- FastAPI App ---
 @asynccontextmanager
@@ -68,7 +95,7 @@ async def lifespan(app: FastAPI):
     Lifespan event handler.
     """
     # Start telegram integration
-    asyncio.create_task(telegram_integration.start())  # Call the method to get a coroutine
+    asyncio.create_task(telegram_integration.start())
     yield
     # Stop telegram integration
     await telegram_integration.stop()
@@ -80,7 +107,7 @@ app = FastAPI(lifespan=lifespan)
 # --- Зависимость для аутентификации по токену ---
 async def verify_token(authorization: Optional[str] = Header(None)):
     """
-    Проверяит токен из заголовка Authorization (схема Bearer).
+    Проверяет токен из заголовка Authorization (схема Bearer).
     """
     if not authorization:
         raise HTTPException(
@@ -128,12 +155,12 @@ class AddDocumentRequest(BaseModel):
 @app.post("/add_document/", dependencies=[Depends(verify_token)])
 async def add_document(request_data: AddDocumentRequest = Body(...)):
     """
-        Добавляет текст как дакумент в векторное хранилище, принимая JSON payload.
+    Добавляет текст как дакумент в векторное хранилище, принимая JSON payload.
 
-        - **text**: Текст документа для добавления.
-        - **label**: Указание источника дакумента (hubspot, telegram, wiki, startrek). Обязательное поле.
-        - **document_id**: Уникальный идентификатор дакумента. Если не указан, генерируется автоматически.
-        - **metadata**: Словарь с метаданными дакумента.  Дополнительные поля будут сохранены.
+    - **text**: Текст документа для добавления.
+    - **label**: Указание источника дакумента (hubspot, telegram, wiki, startrek). Обязательное поле.
+    - **document_id**: Уникальный идентификатор дакумента. Если не указан, генерируется автоматически.
+    - **metadata**: Словарь с метаданными дакумента.  Дополнительные поля будут сохранены.
     """
     try:
         text = request_data.text
@@ -175,39 +202,10 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def create_prompt(question, context):
-    """Создает prompt для фильтрации контекста."""
-    prompt = f"""
-    You are provided with a question and context derived from the knowledge base.
-    Your task is to select from the context only the information that is most relevant to answer the question.
-    Leave only meaningful suggestions and exclude unnecessary details.
-    question: {question}
-    context: {context}
-    relevant context:
-    """
-    return prompt
-
-
 # --- New endpoint for context compression ---
 class CompressContextRequest(BaseModel):
-    question: str
-    context: str
-
-
-class CompressContextResponse(BaseModel):
-    compressed_context: str
-
-
-def chunk_text(text: str, max_words: int = 350) -> List[str]:
-    """Splits the text into chunks of maximum words."""
-    words = text.split()
-    chunks = []
-    start = 0
-    while start < len(words):
-        end = min(start + max_words, len(words))
-        chunks.append(" ".join(words[start:end]))
-        start = end
-    return chunks
+    question = str = ''
+    contexts: List[str]
 
 
 def get_db_connection():
@@ -294,7 +292,7 @@ def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
 
     if len(where) > 1 and "$and" not in where and "$or" not in where:
         # Оборачиваем условия в $and
-        transformed_where = transform_recursive({'$and': [ {k: v} for k, v in where.items()]})
+        transformed_where = transform_recursive({'$and': [{k: v} for k, v in where.items()]})
     else:
         transformed_where = transform_recursive(where)
 
@@ -302,40 +300,146 @@ def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
     return transformed_where if transformed_where else {}
 
 
-summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+nltk.download('stopwords', quiet=True)
+nltk.download('punkt', quiet=True)
 
 
-async def filter_context_with_summarization(question: str, context: str) -> str:
+def clean_text(text, lang='en'):
+    """Очистка текста от стоп-слов и специальных символов."""
+    stop_words = set(stopwords.words('russian'))  # Или 'english', в зависимости от языка
+    word_tokens = word_tokenize(text)
+    cleaned_tokens = [w for w in word_tokens if w.lower() not in stop_words and w.isalnum()]
+    return " ".join(cleaned_tokens)
+
+
+def filter_context_with_summarization(question: str, context: str, summarizer) -> str:
     """
-    Фильтрует контекст, генерируя краткое резюме, отвечающее на вопрос.
+    Фильтрует контекст, генерируя краткое резюме, отвечающее на вопрос,
+    и удаляет слова из вопроса из ответа. Использует чанкинг для обработки больших контекстов.
     """
-    # Скомбинируйте вопрос и контекст для подачи в модель
-    input_text = f"###leave contact information, phone, email if available.\n Question: {question} Context: {context}"
+    logging.info(f"Начало filter_context_with_summarization. Длина контекста: {len(context)}")
 
-    # Calculate max_length dynamically
-    input_length = len(input_text.split())  # Approximate word count
-    max_length = min(int(input_length * 0.5), 2000)  # Set max_length to half the input length, but no more than 2000
-    min_length = min(30, int(input_length * 0.1))  # Ensure min_length is not greater than 30 or 10% of input length
+    def detect_language(context: str) -> str:
+        """Определение языка текста."""
+        cleaned_text = " ".join(context.split())  # Убираем \n и лишние пробелы
+        # Предполагается, что lang_model определен где-то в глобальной области видимости
+        # и имеет метод predict.
+        lang = lang_model.predict([cleaned_text])[0][0][0].replace('__label__', '')
+        logging.info(f"Язык определен: {lang}")
+        return lang
 
-    # Важно: использовать модель асинхронно, если это возможно.  В данном случае pipeline не асинхронный,
-    # поэтому мы используем asyncio.to_thread, чтобы запустить его в отдельном потоке.
-    summary = await asyncio.to_thread(
-        summarizer, input_text,
-        max_length=max_length,
-        min_length=min_length,
-        do_sample=False
-    )
+    # Очистка текста от метаданных и технических деталей (ВАЖНО!)
+    context = context.replace("[META:", "").replace("]", "")  # Пример, настройте под свои метаданные
 
-    return summary[0]['summary_text']
+    lang = detect_language(context)
+    cleaned_question = clean_text(question, lang=lang)
+    prompts = {
+        'en': f"""DONT CUT create_date and type, Shorten it a little, if possible, without loss of meaning to help: \n""",
+        'ru': "Текст нужно сократить без потери смысла и очистить от технических данных: \n"
+    }
+    prompt = prompts.get(lang, prompts['en'])
+
+    # Разбиваем контекст на чанки
+    chunks = split_text_semantically_sync(context, chunk_size=3000, chunk_overlap=200)
+    summarized_chunks = []
+
+    for chunk in chunks:
+        input_text = f"{prompt}{chunk}"
+        logging.info(f"Входной текст для summarizer (чанк), длина: {len(input_text)}")
+
+        # Вычисление max_length динамически
+        input_length = len(input_text.split())
+        max_length = min(int(input_length * 1.2), 1024)  # Увеличиваем max_length
+        min_length = min(1, int(input_length * 0.7))  # Немного увеличиваем min_length
+        logging.info(f"max_length: {max_length}, min_length: {min_length}")
+
+        try:
+            summary = summarizer(
+                input_text,
+                max_length=max_length,
+                min_length=min_length,
+                do_sample=True,
+                truncation=True,  # Важно добавить truncation
+                temperature=0.2  # Устанавливаем температуру
+            )[0]['generated_text']
+        except Exception as e:
+            logging.error(f"Ошибка при вызове summarizer: {e}")
+            raise
+
+        logging.info(f"Результат summarizer (чанк), длина: {len(summary)}")
+        summarized_chunks.append(summary)
+
+    # Объединяем результаты суммирования чанков
+    full_summary = " ".join(summarized_chunks)
+
+    # Post-processing: Удаление слов из вопроса из ответа
+    summary_tokens = word_tokenize(full_summary)
+    question_tokens = word_tokenize(cleaned_question)
+    filtered_summary_tokens = [w for w in summary_tokens if w.lower() not in question_tokens]
+    filtered_summary = " ".join(filtered_summary_tokens)
+    filtered_summary = filtered_summary.replace(prompt[:-3], "")  # Удаляем prompt
+    logging.info("Завершение filter_context_with_summarization")
+    return filtered_summary
 
 
-async def parallel_summarize(question: str, contexts: List[str]) -> List[str]:
-    """
-    Параллельно фильтрует список контекстов, используя asyncio.gather.
-    """
-    tasks = [filter_context_with_summarization(question, context) for context in contexts]
-    filtered_results = await asyncio.gather(*tasks)
-    return filtered_results
+# Глобальные переменные для хранения пайплайнов
+global_summarizers = []
+# Глобальный список для хранения моделей
+global_models = []
+NUM_MODELS = 5  # Максимальное количество моделей
+
+
+def initialize_models():
+    """Инициализирует модели заранее."""
+    global global_models
+    try:
+        global_models = [pipeline("text2text-generation", model="google/flan-t5-large", device="cpu") for _ in
+                         range(NUM_MODELS)]  # device="cpu"  или device="cuda", если хотите использовать GPU
+        logging.info(f"Инициализировано {len(global_models)} моделей.")
+    except Exception as e:
+        logging.error(f"Ошибка при инициализации моделей: {e}")
+        global_models = []  # Убедитесь, что global_models пуст в случае ошибки
+
+
+def get_random_model():
+    """Возвращает случайную модель из списка."""
+    global global_models
+    if not global_models:
+        logging.warning("Список моделей пуст!")
+        return None  # Или выбросить исключение, если это недопустимо
+    model = random.choice(global_models)
+    logging.info(f"Выбрана случайная модель: {model}")
+    return model
+
+
+def filter_context_process(question: str, context: str):
+    """Фильтрует контекст в отдельном процессе."""
+    global global_models  # Добавляем global, чтобы использовать global_models внутри функции
+    if not global_models:  # Проверяем, инициализированы ли модели
+        initialize_models()  # Инициализируем модели, если они еще не инициализированы
+    model = get_random_model()  # Получаем случайную модель для каждого процесса
+    compressed_context = filter_context_with_summarization(question, context, model)  # Проверяем тип
+    return compressed_context
+
+
+async def parallel_summarize_multiprocessing(question: str, contexts: List[str]) -> List[str]:
+    """Параллельно фильтрует контекст с использованием multiprocessing."""
+    # initialize_models() # Убеждаемся, что модели инициализированы перед созданием пула
+
+    logging.info(f"parallel_summarize_multiprocessing: contexts type: {type(contexts)}")  # Проверяем тип
+    if not isinstance(contexts, list):
+        raise TypeError(f"Expected list, but got {type(contexts)}")
+    for context in contexts:
+        if not isinstance(context, str):
+            raise TypeError(f"Expected string in list, but got {type(context)}")
+
+    with mp.Pool(processes=NUM_MODELS) as pool:  # Измените значение по необходимости
+        # Передаем модель как аргумент в filter_context_process
+        # models = [get_random_model() for _ in range(len(contexts))]
+        args = [(question, context) for context in contexts]
+        results = pool.starmap(filter_context_process, args)
+    logging.info(f"parallel_summarize_multiprocessing: results type: {type(results)}")  # Проверяем тип
+    return results
 
 
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
@@ -377,7 +481,7 @@ async def query_documents(query: Query):
     # Group chunks by source_document_id and combine them
     grouped_results = {}
     for item in all_results:
-        if item['distance'] < 10: # Фильтруем по максимальному расстоянию
+        if item['distance'] < 10:  # Фильтруем по максимальному расстоянию
             source_document_id = item['metadata']['source_document_id']
             if source_document_id not in grouped_results:
                 grouped_results[source_document_id] = {
@@ -390,7 +494,8 @@ async def query_documents(query: Query):
 
     # Sort chunks within each group by their ID postfix (e.g., _0, _1, _2)
     for source_document_id, group_data in grouped_results.items():
-        group_data['chunks'].sort(key=lambda x: int(x['id'].split('_')[-1]))  # Extract and sort by the number after the last underscore
+        group_data['chunks'].sort(
+            key=lambda x: int(x['id'].split('_')[-1]))  # Extract and sort by the number after the last underscore
 
     # Combine the sorted chunks into a single document
     combined_documents = []
@@ -400,22 +505,22 @@ async def query_documents(query: Query):
             combined_document += chunk['document'] + '\n'
         combined_documents.append(combined_document)
 
-
     if query.summarize:
+        len_before = sum([len(doc) for doc in combined_documents])
         # Параллельная фильтрация контекста
-        combined_documents = await parallel_summarize(query.text, combined_documents)
-
+        combined_documents = await parallel_summarize_multiprocessing(query.text, combined_documents)
+        len_after = sum([len(doc) for doc in combined_documents])
     # Возвращаем только отфильтрованный контекст
     return ContextResponse(results=combined_documents)
 
 
-@app.post("/summarize_context", response_model=CompressContextResponse, dependencies=[Depends(verify_token)])
-async def summarize_context_endpoint(request: CompressContextRequest):
+@app.post("/summarize_context", response_model=ContextResponse, dependencies=[Depends(verify_token)])
+async def summarize_context_endpoint(query: CompressContextRequest):
     """Compresses the given context based on the question using a summarization model.
     Splits the context into chunks suitable for the summarization model.
     """
-    compress_context_done = await filter_context_with_summarization(request.question, request.context)
-    return await CompressContextResponse(compressed_context=compress_context_done)
+    combined_documents = await parallel_summarize_multiprocessing(query.question, query.contexts)
+    return ContextResponse(results=combined_documents)
 
 
 @app.delete("/delete_document/{document_id}/{label}", dependencies=[Depends(verify_token)])
@@ -459,15 +564,12 @@ async def hubspot_webhook(request: Request):
     return {"message": "HubSpot webhook received and logged successfully."}
 
 
-# --- Signal Handling and atexit ---
+# --- Signal Handling ---
 async def handle_exit():
     logging.info("Завершение работы: сохранение данных...")
     await telegram_integration.sync_save_all_telegram_messages_to_files()
     logging.info("Данные сохранены.")
 
-
-# Register the exit handler
-# atexit.register(handle_exit)
 
 def register_signal_handlers():
     """Registers signal handlers for SIGINT and SIGTERM."""
@@ -477,7 +579,7 @@ def register_signal_handlers():
         try:
             await telegram_integration.sync_save_all_telegram_messages_to_files()  # Save data before exiting
             await telegram_integration.save_telegram_messages_to_chromadb()
-            logging.info("Data saved successfully.");
+            logging.info("Data saved successfully.")
         except Exception as e:
             logging.error(f"Error saving data during shutdown: {e}")
             traceback.print_exc()
@@ -495,5 +597,6 @@ def register_signal_handlers():
 # --- Main ---
 if __name__ == "__main__":
     register_signal_handlers()
-
+    # Инициализация пайплайнов
+    initialize_models()
     uvicorn.run(app, host="0.0.0.0", port=8001)

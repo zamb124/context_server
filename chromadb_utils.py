@@ -1,13 +1,15 @@
 import asyncio
 
 import chromadb
+from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 
-EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"  # ИЗМЕНЕНО
-CHROMA_DB_PATH = "chroma_db"  # Папка, где будет храниться база данных ChromaDB
+EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+CHROMA_DB_PATH = "chroma_db"
 
 sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=EMBEDDING_MODEL_NAME)  # ИЗМЕНЕНО
+    model_name=EMBEDDING_MODEL_NAME
+)
 
 # Создание клиента ChromaDB
 client = chromadb.PersistentClient(path=CHROMA_DB_PATH)

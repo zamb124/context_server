@@ -14,7 +14,7 @@ import torch
 import torch.multiprocessing as mp
 
 torch.set_default_device('cpu')  # Установить CPU как устройство по умолчанию
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Coroutine
 
 import fasttext
 import nltk
@@ -89,16 +89,44 @@ except LookupError:
 
 
 # --- FastAPI App ---
+# Глобальные переменные для хранения пула процессов и очереди задач
+# process_pool: mp.Pool = None
+# task_queue: mp.Queue = None
+NUM_MODELS = 2  # Максимальное количество процессов
+model_name = "google/flan-t5-small" # Имя модели для загрузки
+global summarizer
+process_pool: mp.Pool = None  # Объявляем process_pool глобально
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Lifespan event handler.
     """
+    global summarizer
+    global process_pool
+
+    # Initialize the summarizer model
+    try:
+        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
+        logging.info(f"Model initialized: {model_name}")
+    except Exception as e:
+        logging.error(f"Error initializing model: {e}")
+        raise
+
+    # Initialize the process pool
+    process_pool = mp.Pool(NUM_MODELS)  # Создаем пул процессов
+
     # Start telegram integration
     asyncio.create_task(telegram_integration.start())
+
     yield
+
     # Stop telegram integration
     await telegram_integration.stop()
+
+    # Close the process pool
+    process_pool.close()
+    process_pool.join()
+    logging.info("Process pool closed.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -324,7 +352,11 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
         cleaned_text = " ".join(context.split())  # Убираем \n и лишние пробелы
         # Предполагается, что lang_model определен где-то в глобальной области видимости
         # и имеет метод predict.
-        lang = lang_model.predict([cleaned_text])[0][0][0].replace('__label__', '')
+        try:
+            lang = lang_model.predict([cleaned_text])[0][0][0].replace('__label__', '')
+        except Exception as e:
+            logging.error(f"Error predicting language: {e}")
+            return 'en'  # Default to English if language detection fails
         logging.info(f"Язык определен: {lang}")
         return lang
 
@@ -350,7 +382,7 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
         # Вычисление max_length динамически
         input_length = len(input_text.split())
         max_length = min(int(input_length * 1.2), 1024)  # Увеличиваем max_length
-        min_length = min(1, int(input_length * 0.7))  # Немного увеличиваем min_length
+        min_length = int(input_length * 0.7)  # Немного увеличиваем min_length
         logging.info(f"max_length: {max_length}, min_length: {min_length}")
 
         try:
@@ -378,68 +410,69 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
     filtered_summary_tokens = [w for w in summary_tokens if w.lower() not in question_tokens]
     filtered_summary = " ".join(filtered_summary_tokens)
     filtered_summary = filtered_summary.replace(prompt[:-3], "")  # Удаляем prompt
+
+    # Extract metadata using regex
+    date_match = re.search(r"create_date:\s*([^\n]+)", context)
+    title_match = re.search(r"title:\s*([^\n]+)", context)
+    type_match = re.search(r"type:\s*([^\n]+)", context)
+
+    date = date_match.group(1).strip() if date_match else "N/A"
+    title = title_match.group(1).strip() if title_match else "N/A"
+    event_type = type_match.group(1).strip() if type_match else "N/A"
+
+    # Create intro string
+    intro = f"Date of the event: {date}, Type of event: {event_type}, Title of event: {title}.\n"
+
+    filtered_summary = intro + filtered_summary
+
     logging.info("Завершение filter_context_with_summarization")
     return filtered_summary
 
 
-# Глобальные переменные для хранения пайплайнов
-global_summarizers = []
-# Глобальный список для хранения моделей
-global_models = []
-NUM_MODELS = 3  # Максимальное количество моделей
+# --- Async Summarization ---
 
-
-def initialize_models():
-    """Инициализирует модели заранее."""
-    global global_models
+async def summarize_context_async(question: str, context: str) -> str:
+    """Asynchronously summarizes a single context."""
+    global summarizer
     try:
-        global_models = [pipeline("text2text-generation", model="google/flan-t5-large", device="cpu") for _ in
-                         range(NUM_MODELS)]  # device="cpu"  или device="cuda", если хотите использовать GPU
-        logging.info(f"Инициализировано {len(global_models)} моделей.")
+        return filter_context_with_summarization(question, context, summarizer)
     except Exception as e:
-        logging.error(f"Ошибка при инициализации моделей: {e}")
-        global_models = []  # Убедитесь, что global_models пуст в случае ошибки
+        logging.error(f"Error summarizing context: {e}")
+        traceback.print_exc()
+        return ""  # Return an empty string or handle the error as needed
 
+async def run_sync_in_executor(func, *args, **kwargs):
+    """Runs a synchronous function in an executor to avoid blocking the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, func, *args, **kwargs)
 
-def get_random_model():
-    """Возвращает случайную модель из списка."""
-    global global_models
-    if not global_models:
-        logging.warning("Список моделей пуст!")
-        return None  # Или выбросить исключение, если это недопустимо
-    model = random.choice(global_models)
-    logging.info(f"Выбрана случайная модель: {model}")
-    return model
+def summarize_context_in_process(question: str, context: str, summarizer):
+    """Wrapper function to run in a separate process."""
+    try:
+        # Run filter_context_with_summarization in an executor to avoid blocking
+        return asyncio.run(run_sync_in_executor(filter_context_with_summarization, question, context, summarizer))
+    except Exception as e:
+        logging.error(f"Error summarizing context in process: {e}")
+        return ""
 
-
-def filter_context_process(question: str, context: str):
-    """Фильтрует контекст в отдельном процессе."""
-    global global_models  # Добавляем global, чтобы использовать global_models внутри функции
-    if not global_models:  # Проверяем, инициализированы ли модели
-        initialize_models()  # Инициализируем модели, если они еще не инициализированы
-    model = get_random_model()  # Получаем случайную модель для каждого процесса
-    compressed_context = filter_context_with_summarization(question, context, model)  # Проверяем тип
-    return compressed_context
-
-
-async def parallel_summarize_multiprocessing(question: str, contexts: List[str]) -> List[str]:
-    """Параллельно фильтрует контекст с использованием multiprocessing."""
-    # initialize_models() # Убеждаемся, что модели инициализированы перед созданием пула
-
-    logging.info(f"parallel_summarize_multiprocessing: contexts type: {type(contexts)}")  # Проверяем тип
+async def parallel_summarize_async(question: str, contexts: List[str]) -> List[str]:
+    """Asynchronously summarizes a list of contexts using the process pool."""
     if not isinstance(contexts, list):
         raise TypeError(f"Expected list, but got {type(contexts)}")
     for context in contexts:
         if not isinstance(context, str):
             raise TypeError(f"Expected string in list, but got {type(context)}")
 
-    with mp.Pool(processes=NUM_MODELS) as pool:  # Измените значение по необходимости
-        # Передаем модель как аргумент в filter_context_process
-        # models = [get_random_model() for _ in range(len(contexts))]
-        args = [(question, context) for context in contexts]
-        results = pool.starmap(filter_context_process, args)
-    logging.info(f"parallel_summarize_multiprocessing: results type: {type(results)}")  # Проверяем тип
-    return results
+    global process_pool  # Используем глобальный пул процессов
+    global summarizer
+
+    # Use process_pool.apply_async to submit tasks
+    results = [process_pool.apply_async(summarize_context_in_process, (question, context, summarizer)) for context in contexts]
+
+    # Get results from the asynchronous tasks
+    summarized_contexts = [result.get() for result in results]
+
+    return summarized_contexts
 
 
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
@@ -508,7 +541,7 @@ async def query_documents(query: Query):
     if query.summarize:
         len_before = sum([len(doc) for doc in combined_documents])
         # Параллельная фильтрация контекста
-        combined_documents = await parallel_summarize_multiprocessing(query.text, combined_documents)
+        combined_documents = await parallel_summarize_async(query.text, combined_documents)
         len_after = sum([len(doc) for doc in combined_documents])
     # Возвращаем только отфильтрованный контекст
     return ContextResponse(results=combined_documents)
@@ -519,7 +552,7 @@ async def summarize_context_endpoint(query: CompressContextRequest):
     """Compresses the given context based on the question using a summarization model.
     Splits the context into chunks suitable for the summarization model.
     """
-    combined_documents = await parallel_summarize_multiprocessing(query.question, query.contexts)
+    combined_documents = await parallel_summarize_async(query.question, query.contexts)
     return ContextResponse(results=combined_documents)
 
 
@@ -597,6 +630,4 @@ def register_signal_handlers():
 # --- Main ---
 if __name__ == "__main__":
     register_signal_handlers()
-    # Инициализация пайплайнов
-    initialize_models()
     uvicorn.run(app, host="0.0.0.0", port=8001)

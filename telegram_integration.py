@@ -242,6 +242,9 @@ class TelegramIntegration:
                                         "partner": partner
                                     }
                                 )
+                            if not deal_id:
+                                logging.warning(f"Deal ID not found for conversation {conversation_id}")
+                                continue
                             # Валидируем метаданные с помощью Pydantic Model
                             validated_metadata = ValidatedTelegramMetadata(**metadata_dict)
                             collection.upsert(

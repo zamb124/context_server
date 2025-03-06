@@ -10,39 +10,25 @@ import ssl
 import sys
 import traceback
 from contextlib import asynccontextmanager
-
-import torch
-import torch.multiprocessing as mp
-
-torch.set_default_device('cpu')  # Установить CPU как устройство по умолчанию
 from typing import Dict, Optional, Any, List, Coroutine
 
 import fasttext
 import nltk
-
+import torch
+import torch.multiprocessing as mp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header, status, Body, Depends
 from pydantic import BaseModel
 from starlette.requests import Request
-
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
-nltk.download('bcp47', quiet=True)
-nltk.download('stopwords')
-nltk.download('punkt_tab')
 from transformers import pipeline
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
 from chromadb_utils import get_collection, upsert_to_collection
 from config import config
 from models import ValidLabels, DocumentBase, Query, ContextResponse, ForceSaveResponse
 from telegram_integration import telegram_integration
 from text_utils import split_text_semantically, split_text_semantically_sync
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Установить параллелизм для токенизаторов
 
 # --- Конфигурация ---
 CHROMA_DB_PATH = "chroma_db"
@@ -65,9 +51,6 @@ logging.basicConfig(level=logging.INFO,
 # --- Загрузка моделей ---
 fasttext_model_path = "lid.176.bin"
 lang_model = fasttext.load_model(fasttext_model_path)
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
 
 nltk.data.path.append('nltk')
 try:
@@ -76,171 +59,115 @@ except LookupError:
     nltk.download('stopwords')
     stop_words = set(stopwords.words('english'))  # Или 'english'
 
-
-# Создаем pipeline summarization один раз, глобально.  Важно!
-# summarizer_en = pipeline("summarization", model="facebook/bart-large-cnn")
-# summarizer_en = pipeline("text2text-generation", model="google/flan-t5-large")
-
-# summarizer_ru = pipeline("text2text-generation", model="sberbank-ai/ruT5-large")  # Пока не используется
-
-# summarizers = {
-# 'en': summarizer_en,
-# 'ru': summarizer_ru  # Пока используем en для ru
-# }
-
-
 # --- FastAPI App ---
 # Глобальные переменные для хранения пула процессов и очереди задач
-# process_pool: mp.Pool = None
-# task_queue: mp.Queue = None
 NUM_MODELS = 2  # Максимальное количество процессов
-model_name = "google/flan-t5-small" # Имя модели для загрузки
+model_name = "google/flan-t5-large"  # Имя модели для загрузки
 global summarizer
 process_pool: mp.Pool = None  # Объявляем process_pool глобально
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Lifespan event handler.
-    """
-    global summarizer
-    global process_pool
 
-    # Initialize the summarizer model
-    try:
-        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
-        logging.info(f"Model initialized: {model_name}")
-    except Exception as e:
-        logging.error(f"Error initializing model: {e}")
-        raise
+# --- FastAPI App ---
+app = FastAPI()
 
-    # Initialize the process pool
-    process_pool = mp.Pool(NUM_MODELS)  # Создаем пул процессов
-
-    # Start telegram integration
-    asyncio.create_task(telegram_integration.start())
-
-    yield
-
-    # Stop telegram integration
-    await telegram_integration.stop()
-
-    # Close the process pool
-    process_pool.close()
-    process_pool.join()
-    logging.info("Process pool closed.")
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-# --- Зависимость для аутентификации по токену ---
-async def verify_token(authorization: Optional[str] = Header(None)):
-    """
-    Проверяет токен из заголовка Authorization (схема Bearer).
-    """
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Отсутствует заголовок Authorization",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Неверная схема аутентификации. Используйте Bearer.",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный формат заголовка Authorization",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    if token != CHAT_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный токен аутентификации",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return True
-
-
-class AddDocumentRequest(BaseModel):
-    """
-    Модель запроса для добавления дакумента.
-    """
-    text: str
-    label: ValidLabels
-    document_id: Optional[str] = None
-    metadata: DocumentBase
-    chunk: Optional[bool] = True
-    author: Optional[str] = None
-
-
-@app.post("/add_document/", dependencies=[Depends(verify_token)])
-async def add_document(request_data: AddDocumentRequest = Body(...)):
-    """
-    Добавляет текст как дакумент в векторное хранилище, принимая JSON payload.
-
-    - **text**: Текст документа для добавления.
-    - **label**: Указание источника дакумента (hubspot, telegram, wiki, startrek). Обязательное поле.
-    - **document_id**: Уникальный идентификатор дакумента. Если не указан, генерируется автоматически.
-    - **metadata**: Словарь с метаданными дакумента.  Дополнительные поля будут сохранены.
-    """
-    try:
-        text = request_data.text
-        label = request_data.label
-        document_id = request_data.document_id
-        metadata = request_data.metadata
-
-        # Generate document_id if not provided
-        document_id = document_id or f"doc_{label}_{hash(text)}"
-
-        collection = get_collection(label.value)
-        # Удаляем старые чанки дакумента, если они есть
-        collection.delete(where={"source_document_id": document_id})
-
-        combined_metadata = json.loads(metadata.model_dump_json())
-
-        if request_data.chunk:  # По умолчанию разбиваем на чанки, если не указано "chunk": false
-            # Разбиваем на чанки
-            chunks = await split_text_semantically(text)
-            meta_end_text = '[META: ' + ','.join([f'{k}: {v}' for k, v in combined_metadata.items()]) + ']'
-            chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
-
-            metadatas = []
-            for i in range(len(chunks)):
-                chunks[i] = chunks[i] + '\n' + meta_end_text
-                chunk_metadata = combined_metadata
-                chunk_metadata["source_document_id"] = document_id
-                metadatas.append(chunk_metadata)
-            await upsert_to_collection(collection, chunks, metadatas, chunk_ids)
-        else:
-            # Сохраняем файл целиком
-            combined_metadata["source_document_id"] = document_id  # Добавляем source_document_id
-            await upsert_to_collection(collection, [text], [combined_metadata], [document_id])
-
-        return {"message": f"Дакумент успешно обработан и добавлен с label {label.value} и ID {document_id}."}
-
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# --- New endpoint for context compression ---
-class CompressContextRequest(BaseModel):
-    question:str = ''
-    contexts: list
-
-
+# --- Утилиты ---
 def get_db_connection():
+    """
+    Получает соединение с базой данных SQLite.
+    """
     conn = sqlite3.connect(f'{CHROMA_DB_PATH}/chroma.sqlite3')
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def clean_text(text, lang='en'):
+    """
+    Очистка текста от стоп-слов и специальных символов.
+
+    Args:
+        text: Текст для очистки.
+        lang: Язык текста (по умолчанию 'en').
+
+    Returns:
+        Очищенный текст.
+    """
+    stop_words = set(stopwords.words('english'))  # Или 'english', в зависимости от языка
+    word_tokens = word_tokenize(text)
+    cleaned_tokens = [w for w in word_tokens if w.lower() not in stop_words and w.isalnum()]
+    return " ".join(cleaned_tokens)
+
+
+def _process_contains(key: str, search_string: str) -> Dict[str, Any]:
+    """
+    Выполняет поиск в базе данных и возвращает условие $in.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = f"""
+        SELECT DISTINCT
+            CASE
+                WHEN string_value IS NOT NULL THEN string_value
+                WHEN int_value IS NOT NULL THEN int_value
+                WHEN float_value IS NOT NULL THEN float_value
+                WHEN bool_value IS NOT NULL THEN bool_value
+            END AS value
+        FROM embedding_metadata
+        WHERE key = ?
+          AND (
+              lower(string_value) LIKE lower(?) OR
+              CAST(int_value AS TEXT) LIKE lower(?) OR
+              CAST(float_value AS TEXT) LIKE lower(?) OR
+              CAST(bool_value AS TEXT) LIKE lower(?)
+          )
+    """
+    cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%',
+                           '%' + search_string + '%'))
+    values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
+
+    conn.close()
+
+    if values:
+        return {"$in": values}
+    else:
+        # Если ничего не найдено, возвращаем невозможное условие
+        return {"$eq": "impossible_value"}
+
+
+def _transform_recursive(condition: Any) -> Any:
+    """
+    Рекурсивно преобразует условие, заменяя $contains на $in и обрабатывая $and и $or.
+    """
+    if isinstance(condition, dict):
+        new_condition = {}
+        for key, value in condition.items():
+            if isinstance(value, dict) and "$contains" in value:
+                # Обрабатываем $contains
+                search_string = value["$contains"]
+                transformed_value = _process_contains(key, search_string)
+                if transformed_value != {"$eq": "impossible_value"}:
+                    new_condition[key] = transformed_value
+            elif key in ("$and", "$or"):
+                # Рекурсивно обрабатываем $and и $or
+                transformed_list = [_transform_recursive(item) for item in value]
+                # Фильтруем "impossible_value" из списков $and и $or
+                filtered_list = [item for item in transformed_list if item]  # Пустые словари считаются False
+                if filtered_list:
+                    new_condition[key] = filtered_list
+            else:
+                # Рекурсивно обрабатываем другие ключи
+                new_condition[key] = _transform_recursive(value)
+
+        # Упрощаем $and, если в нем остался только один элемент
+        if "$and" in new_condition and len(new_condition["$and"]) == 1:
+            return new_condition["$and"][0]
+        elif not new_condition:
+            # Если словарь пустой, возвращаем None, чтобы его можно было отфильтровать
+            return None
+        else:
+            return new_condition
+    else:
+        # Возвращаем значение как есть, если это не словарь
+        return condition
 
 
 def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
@@ -249,96 +176,14 @@ def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
     Удаляет "impossible_value" и упрощает $and, если это необходимо.
     Если в where больше 1 параметра, оборачивает их в $and.
     """
-
-    def transform_recursive(condition: Any) -> Any:
-        if isinstance(condition, dict):
-            new_condition = {}
-            for key, value in condition.items():
-                if isinstance(value, dict) and "$contains" in value:
-                    # Обрабатываем $contains
-                    search_string = value["$contains"]
-                    transformed_value = process_contains(key, search_string)
-                    if transformed_value != {"$eq": "impossible_value"}:
-                        new_condition[key] = transformed_value
-                elif key in ("$and", "$or"):
-                    # Рекурсивно обрабатываем $and и $or
-                    transformed_list = [transform_recursive(item) for item in value]
-                    # Фильтруем "impossible_value" из списков $and и $or
-                    filtered_list = [item for item in transformed_list if item]  # Пустые словари считаются False
-                    if filtered_list:
-                        new_condition[key] = filtered_list
-                else:
-                    # Рекурсивно обрабатываем другие ключи
-                    new_condition[key] = transform_recursive(value)
-
-            # Упрощаем $and, если в нем остался только один элемент
-            if "$and" in new_condition and len(new_condition["$and"]) == 1:
-                return new_condition["$and"][0]
-            elif not new_condition:
-                # Если словарь пустой, возвращаем None, чтобы его можно было отфильтровать
-                return None
-            else:
-                return new_condition
-        else:
-            # Возвращаем значение как есть, если это не словарь
-            return condition
-
-    def process_contains(key: str, search_string: str) -> Dict[str, Any]:
-        """
-        Выполняет поиск в базе данных и возвращает условие $in.
-        """
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        query = f"""
-            SELECT DISTINCT
-                CASE
-                    WHEN string_value IS NOT NULL THEN string_value
-                    WHEN int_value IS NOT NULL THEN int_value
-                    WHEN float_value IS NOT NULL THEN float_value
-                    WHEN bool_value IS NOT NULL THEN bool_value
-                END AS value
-            FROM embedding_metadata
-            WHERE key = ?
-              AND (
-                  lower(string_value) LIKE lower(?) OR
-                  CAST(int_value AS TEXT) LIKE lower(?) OR
-                  CAST(float_value AS TEXT) LIKE lower(?) OR
-                  CAST(bool_value AS TEXT) LIKE lower(?)
-              )
-        """
-        cursor.execute(query, (key, '%' + search_string + '%', '%' + search_string + '%', '%' + search_string + '%',
-                               '%' + search_string + '%'))
-        values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
-
-        conn.close()
-
-        if values:
-            return {"$in": values}
-        else:
-            # Если ничего не найдено, возвращаем невозможное условие
-            return {"$eq": "impossible_value"}
-
     if len(where) > 1 and "$and" not in where and "$or" not in where:
         # Оборачиваем условия в $and
-        transformed_where = transform_recursive({'$and': [{k: v} for k, v in where.items()]})
+        transformed_where = _transform_recursive({'$and': [{k: v} for k, v in where.items()]})
     else:
-        transformed_where = transform_recursive(where)
+        transformed_where = _transform_recursive(where)
 
     # Если верхний уровень стал None, возвращаем пустой словарь
     return transformed_where if transformed_where else {}
-
-
-nltk.download('stopwords', quiet=True)
-nltk.download('punkt', quiet=True)
-
-
-def clean_text(text, lang='en'):
-    """Очистка текста от стоп-слов и специальных символов."""
-    stop_words = set(stopwords.words('russian'))  # Или 'english', в зависимости от языка
-    word_tokens = word_tokenize(text)
-    cleaned_tokens = [w for w in word_tokens if w.lower() not in stop_words and w.isalnum()]
-    return " ".join(cleaned_tokens)
 
 
 def filter_context_with_summarization(question: str, context: str, summarizer) -> str:
@@ -346,7 +191,7 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
     Фильтрует контекст, генерируя краткое резюме, отвечающее на вопрос,
     и удаляет слова из вопроса из ответа. Использует чанкинг для обработки больших контекстов.
     """
-    logging.info(f"Начало filter_context_with_summarization. Длина контекста: {len(context)}")
+    logging.info(f"Начала filter_context_with_summarization. Длина контекста: {len(context)}")
 
     def detect_language(context: str) -> str:
         """Определение языка текста."""
@@ -367,7 +212,7 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
     lang = detect_language(context)
     cleaned_question = clean_text(question, lang=lang)
     prompts = {
-        'en': f"""DONT CUT create_date and type, Shorten it a little, if possible, without loss of meaning to help: \n""",
+        'en': f"""Shorten it a little, if possible, without loss of meaning to help: \n""",
         'ru': "Текст нужно сократить без потери смысла и очистить от технических данных: \n"
     }
     prompt = prompts.get(lang, prompts['en'])
@@ -376,9 +221,9 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
     chunks = split_text_semantically_sync(context, chunk_size=3000, chunk_overlap=200)
     summarized_chunks = []
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         input_text = f"{prompt}{chunk}"
-        logging.info(f"Входной текст для summarizer (чанк), длина: {len(input_text)}")
+        logging.info(f"Входной текст для summarizer (чанк {i}), длина: {len(input_text)}")
 
         # Вычисление max_length динамически
         input_length = len(input_text.split())
@@ -430,34 +275,40 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
     return filtered_summary
 
 
-# --- Async Summarization ---
+async def run_sync_in_executor(func, *args, **kwargs):
+    """Запускает синхронную функцию в экзекуторе, чтобы избежать блокировки цикла событий."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, func, *args, **kwargs)
 
+
+# --- Фоновые задачи ---
 async def summarize_context_async(question: str, context: str) -> str:
-    """Asynchronously summarizes a single context."""
+    """Асинхронно суммирует один контекст."""
     global summarizer
     try:
         return filter_context_with_summarization(question, context, summarizer)
     except Exception as e:
-        logging.error(f"Error summarizing context: {e}")
+        logging.error(f"Ошибка суммирования контекста: {e}")
         traceback.print_exc()
         return ""  # Return an empty string or handle the error as needed
 
-async def run_sync_in_executor(func, *args, **kwargs):
-    """Runs a synchronous function in an executor to avoid blocking the event loop."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func, *args, **kwargs)
 
 def summarize_context_in_process(question: str, context: str, summarizer):
-    """Wrapper function to run in a separate process."""
+    """Функция-обертка для запуска в отдельном процессе."""
     try:
         # Run filter_context_with_summarization in an executor to avoid blocking
         return asyncio.run(run_sync_in_executor(filter_context_with_summarization, question, context, summarizer))
     except Exception as e:
-        logging.error(f"Error summarizing context in process: {e}")
+        logging.error(f"Ошибка суммирования контекста в процессе: {e}")
         return ""
 
+async def summarize_context_async_wrapper(question: str, context: str, summarizer):
+    """Обертка для запуска в отдельном потоке."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, summarize_context_in_process, question, context, summarizer)
+
 async def parallel_summarize_async(question: str, contexts: List[str]) -> List[str]:
-    """Asynchronously summarizes a list of contexts using the process pool."""
+    """Асинхронно суммирует список контекстов с использованием пула процессов."""
     if not isinstance(contexts, list):
         raise TypeError(f"Expected list, but got {type(contexts)}")
     for context in contexts:
@@ -467,18 +318,126 @@ async def parallel_summarize_async(question: str, contexts: List[str]) -> List[s
     global process_pool  # Используем глобальный пул процессов
     global summarizer
 
-    # Use process_pool.apply_async to submit tasks
-    results = [process_pool.apply_async(summarize_context_in_process, (question, context, summarizer)) for context in contexts]
+    # Create a list of tasks
+    tasks = [summarize_context_async_wrapper(question, context, summarizer) for context in contexts]
 
-    # Get results from the asynchronous tasks
-    summarized_contexts = [result.get() for result in results]
+    # Use asyncio.gather to run tasks concurrently
+    summarized_contexts = await asyncio.gather(*tasks)
 
     return summarized_contexts
 
 
+# --- Модели ---
+class AddDocumentRequest(BaseModel):
+    """
+    Модель запроса для добавления документа.
+    """
+    text: str
+    label: ValidLabels
+    document_id: Optional[str] = None
+    metadata: DocumentBase
+    chunk: Optional[bool] = True
+    author: Optional[str] = None
+
+
+class CompressContextRequest(BaseModel):
+    question: str = ''
+    contexts: list
+
+
+# --- Зависимости ---
+async def verify_token(authorization: Optional[str] = Header(None)):
+    """
+    Проверяет токен из заголовка Authorization (схема Bearer).
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Отсутствует заголовок Authorization",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Неверная схема аутентификации. Используйте Bearer.",
+                headers={"WWW-Authenticate": "Bearer"},
+                )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный формат заголовка Authorization",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if token != CHAT_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный токен аутентификации",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return True
+
+
+# --- Эндпоинты ---
+@app.post("/add_document/", dependencies=[Depends(verify_token)])
+async def add_document(request_data: AddDocumentRequest = Body(...)):
+    """
+    Добавляет текст как документ в векторное хранилище, принимая JSON payload.
+
+    - **text**: Текст документа для добавления.
+    - **label**: Указание источника документа (hubspot, telegram, wiki, startrek). Обязательное поле.
+    - **document_id**: Уникальный идентификатор документа. Если не указан, генерируется автоматически.
+    - **metadata**: Словарь с метаданными документа. Дополнительные поля будут сохранены.
+    """
+    try:
+        text = request_data.text
+        label = request_data.label
+        document_id = request_data.document_id
+        metadata = request_data.metadata
+
+        # Generate document_id if not provided
+        document_id = document_id or f"doc_{label}_{hash(text)}"
+
+        collection = get_collection(label.value)
+        # Удаляем старые чанки документа, если они есть
+        collection.delete(where={"source_document_id": document_id})
+
+        combined_metadata = json.loads(metadata.model_dump_json())
+
+        if request_data.chunk:  # По умолчанию разбиваем на чанки, если не указана "chunk": false
+            # Разбиваем на чанки
+            chunks = await split_text_semantically(text)
+            meta_end_text = '[META: ' + ','.join([f'{k}: {v}' for k, v in combined_metadata.items()]) + ']'
+            chunk_ids = [f"{document_id}_{i}" for i in range(len(chunks))]
+
+            metadatas = []
+            for i in range(len(chunks)):
+                chunks[i] = chunks[i] + '\n' + meta_end_text
+                chunk_metadata = combined_metadata
+                chunk_metadata["source_document_id"] = document_id
+                metadatas.append(chunk_metadata)
+            await upsert_to_collection(collection, chunks, metadatas, chunk_ids)
+        else:
+            # Сохраняем файл целиком
+            combined_metadata["source_document_id"] = document_id  # Добавляем source_document_id
+            await upsert_to_collection(collection, [text], [combined_metadata], [document_id])
+
+        return {"message": f"Документ успешно обработан и добавлен с label {label.value} и ID {document_id}."}
+
+    except Exception as e:
+        logging.error(f"Ошибка при добавлении документа: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
 async def query_documents(query: Query):
-    """Выполняет поиск дакументов в векторном хранилище и фильтрует контекст локальной LLM."""
+    """
+    Выполняет поиск документов в векторном хранилище и фильтрует контекст локальной LLM.
+    """
     all_results = []
     for label in query.labels:  # Итерируемся по списку labels
         try:
@@ -506,8 +465,10 @@ async def query_documents(query: Query):
             all_results.extend(extracted_results)
 
         except Exception as e:
-            logging.error(f"Ошибка при запросе label {label}: {e}")  # Логируем ошибку, но продолжаем
+            logging.error(f"Ошибка при запросе label {label}: {e}")  # Логируем ошибку
             traceback.print_exc()
+            # Возвращаем ошибку клиенту
+            raise HTTPException(status_code=500, detail=f"Ошибка при запросе label {label}: {e}")
 
     # Сортируем результаты по расстоянию (по возрастанию)
     all_results.sort(key=lambda x: x['distance'])
@@ -544,6 +505,7 @@ async def query_documents(query: Query):
         # Параллельная фильтрация контекста
         combined_documents = await parallel_summarize_async(query.text, combined_documents)
         len_after = sum([len(doc) for doc in combined_documents])
+        logging.info(f"Длина контекста до суммирования: {len_before}, после: {len_after}")
     # Возвращаем только отфильтрованный контекст
     return ContextResponse(results=combined_documents)
 
@@ -559,18 +521,21 @@ async def summarize_context_endpoint(query: CompressContextRequest):
 
 @app.delete("/delete_document/{document_id}/{label}", dependencies=[Depends(verify_token)])
 async def delete_document(document_id: str, label: str):
-    """Удаляет дакумент или фрагмент дакумента из векторного хранилища по ID и label."""
+    """Удаляет документ или фрагмент документа из векторного хранилища по ID и label."""
     try:
         collection = get_collection(label)  # Получаем коллекцию для label
         # !ВАЖНО: Удаляем все фрагменты, связанные с исходным document_id
         collection.delete(where={"source_document_id": document_id})
-        return {"message": f"Дакумент с ID {document_id} и все его фрагменты с label {label} успешно удалены"}
+        return {"message": f"Документ с ID {document_id} и все его фрагменты с label {label} успешно удалены"}
     except Exception as e:
+        logging.error(f"Ошибка при удалении документа: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 async def health_check():
+    """Проверка работоспособности сервиса."""
     return {"status": "ok"}
 
 
@@ -598,10 +563,64 @@ async def hubspot_webhook(request: Request):
     return {"message": "HubSpot webhook received and logged successfully."}
 
 
+# --- Lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan event handler.
+    """
+    global summarizer
+    global process_pool
+
+    # Initialize the summarizer model
+    try:
+        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
+        logging.info(f"Model initialized: {model_name}")
+    except Exception as e:
+        logging.error(f"Error initializing model: {e}")
+        raise
+
+    # Initialize the process pool
+    process_pool = mp.Pool(NUM_MODELS)  # Создаем пул процессов
+
+    # Start telegram integration
+    asyncio.create_task(telegram_integration.start())
+
+    yield
+
+    # Stop telegram integration
+    await telegram_integration.stop()
+
+    # Close the process pool
+    process_pool.close()
+    process_pool.join()
+    logging.info("Process pool closed.")
+
+
+app.router.lifespan_context = lifespan  # Assign lifespan to the app
+
+
 # --- Signal Handling ---
 async def handle_exit():
+    """
+    Обработчик завершения работы приложения.
+    Сохраняет данные перед выходом.
+    """
     logging.info("Завершение работы: сохранение данных...")
-    await telegram_integration.sync_save_all_telegram_messages_to_files()
+    try:
+        await telegram_integration.sync_save_all_telegram_messages_to_files()
+        logging.info("Данные Telegram сохранены.")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении данных Telegram: {e}")
+        traceback.print_exc()
+
+    try:
+        await telegram_integration.save_telegram_messages_to_chromadb()
+        logging.info("Данные Telegram сохранены в ChromaDB.")
+    except Exception as e:
+        logging.error(f"Ошибка при сохранении данных Telegram в ChromaDB: {e}")
+        traceback.print_exc()
+
     logging.info("Данные сохранены.")
 
 
@@ -610,15 +629,8 @@ def register_signal_handlers():
 
     async def signal_handler(sig, frame):
         logging.info(f"Received signal {sig}. Exiting...")
-        try:
-            await telegram_integration.sync_save_all_telegram_messages_to_files()  # Save data before exiting
-            await telegram_integration.save_telegram_messages_to_chromadb()
-            logging.info("Data saved successfully.")
-        except Exception as e:
-            logging.error(f"Error saving data during shutdown: {e}")
-            traceback.print_exc()
-        finally:
-            sys.exit(0)
+        await handle_exit()  # Используем общую функцию для сохранения данных
+        sys.exit(0)
 
     def handle_signal(sig, frame):
         loop = asyncio.get_event_loop()
@@ -630,5 +642,10 @@ def register_signal_handlers():
 
 # --- Main ---
 if __name__ == "__main__":
+    torch.set_default_device('cpu')  # Установить CPU как устройство по умолчанию
+    os.environ["TOKENIZERS_PARALLELISM"] = "true"  # Установить параллелизм для токенизаторов
+    nltk.download('bcp47', quiet=True)
+    nltk.download('stopwords')
+    nltk.download('punkt_tab')
     register_signal_handlers()
     uvicorn.run(app, host="0.0.0.0", port=8001)

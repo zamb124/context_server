@@ -386,7 +386,7 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
 global_summarizers = []
 # Глобальный список для хранения моделей
 global_models = []
-NUM_MODELS = 5  # Максимальное количество моделей
+NUM_MODELS = 3  # Максимальное количество моделей
 
 
 def initialize_models():

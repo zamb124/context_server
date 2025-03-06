@@ -61,8 +61,8 @@ except LookupError:
 
 # --- FastAPI App ---
 # Глобальные переменные для хранения пула процессов и очереди задач
-NUM_MODELS = 2  # Максимальное количество процессов
-model_name = "google/flan-t5-large"  # Имя модели для загрузки
+NUM_MODELS = 5  # Максимальное количество процессов
+model_name = "t5-base"  # Имя модели для загрузки
 global summarizer
 process_pool: mp.Pool = None  # Объявляем process_pool глобально
 
@@ -574,7 +574,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize the summarizer model
     try:
-        summarizer = pipeline("summarization", model=model_name, device="cpu")
+        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
         logging.info(f"Model initialized: {model_name}")
     except Exception as e:
         logging.error(f"Error initializing model: {e}")

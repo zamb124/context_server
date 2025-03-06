@@ -184,9 +184,15 @@ class TelegramIntegration:
                             deal_id = None
                             # Создаем словарь для метаданных
                             if not conversation.get("deal_id"):
-                                chat_details = await self.get_chat_details(conversation_id.split(":")[-2])
+                                chat_id = conversation.get("chat_id")
+                                if not chat_id:
+                                    pattern = r"-?\d+"
+                                    match = re.search(pattern, conversation_id)
+                                    if match:
+                                        chat_id = match.group()
+                                chat_details = await self.get_chat_details(chat_id)
                                 chat_title = chat_details.get("title",
-                                                              f"ChatID_{conversation_id.split(":")[-2]}") if chat_details else f"ChatID_{conversation_id.split(":")[-2]}"
+                                                              f"ChatID_{chat_id}") if chat_details else f"ChatID_{conversation_id.split(":")[-2]}"
                                 chat_description = chat_details.get("description", "") if chat_details else ""
 
                                 # Extract deal ID from chat title or description
@@ -459,6 +465,7 @@ class TelegramIntegration:
                             if text:
                                 message_data = {
                                     "message_id": message_id,
+                                    "chat_id": chat_id,
                                     "date": human_readable_date,
                                     "text": text,
                                     "conversation_message_start_id": conversation_message_start_id,

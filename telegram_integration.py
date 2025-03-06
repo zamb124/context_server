@@ -31,7 +31,11 @@ deal_cache = {}  # Initialize the deal cache
 
 def clean_text(text):
     """Removes all characters except letters and numbers from the text."""
-    return re.sub(r'[^a-zA-Z0-9]', '', text)
+    try:
+        return re.sub(r'[^a-zA-Z0-9]', '', text)
+    except Exception as e:
+        logging.error(f"Error cleaning text: {e}")
+        return ''
 
 class TelegramIntegration:
     def __init__(self):
@@ -219,7 +223,8 @@ class TelegramIntegration:
                                         "company_id": company_id,
                                         "partner": partner
                                     }
-
+                            if not conversation.get("partner"):
+                                conversation['partner'] = ''
                             metadata_dict = {
                                 "chat": chat_title,
                                 "chat_id": conversation_id.split(":")[-2],
@@ -437,9 +442,9 @@ class TelegramIntegration:
                                 f"Получено сообщение из чата {chat_title} от {date}")  # Removed the message text
                             human_readable_date = datetime.fromtimestamp(message["date"]).strftime('%Y-%m-%d %H:%M:%S')
 
-                            deal_title = None
-                            company_id = None
-                            partner = None
+                            deal_title = ''
+                            company_id = ''
+                            partner = ''
 
                             # Enrich message with deal and company information
                             if deal_id:
@@ -449,7 +454,7 @@ class TelegramIntegration:
                                     company_id = deal_data.get("company_id")
                                     partner = deal_data.get("company_title")
                                 else:
-                                    deal_data = None
+                                    deal_data = ''
                                     if deal_id:
                                         deal_data = await self.get_deal_from_hubspot(deal_id)
                                     if deal_data:

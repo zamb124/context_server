@@ -19,7 +19,7 @@ from config import config
 from models import ValidatedTelegramMetadata
 
 TEMP_STORAGE_PATH = "temp_telegram_data"  # Папка для временного хранения данных Telegram
-SAVE_INTERVAL_SECONDS = 60  # Интервал сохранения в секундах (10 минут)
+SAVE_INTERVAL_SECONDS = 600  # Интервал сохранения в секундах (10 минут)
 OFFSET_FILE = "offset.txt"
 TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN
 HUBSPOT_API_KEY = config.HUBSPOT_API_KEY

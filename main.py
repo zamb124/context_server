@@ -574,7 +574,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize the summarizer model
     try:
-        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
+        summarizer = pipeline("summarization", model=model_name, device="cpu")
         logging.info(f"Model initialized: {model_name}")
     except Exception as e:
         logging.error(f"Error initializing model: {e}")

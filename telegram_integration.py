@@ -200,7 +200,9 @@ class TelegramIntegration:
                                 match = re.search(r"(\d{11})", chat_title + chat_description)
                                 if match:
                                     deal_id = match.group(1)
-                                deal_data = await self.get_deal_from_hubspot(deal_id)
+                                deal_data = None
+                                if deal_id:
+                                    deal_data = await self.get_deal_from_hubspot(deal_id)
                                 if deal_data:
                                     deal_title = deal_data["properties"].get("dealname")
                                     company_ids = list(
@@ -447,7 +449,9 @@ class TelegramIntegration:
                                     company_id = deal_data.get("company_id")
                                     partner = deal_data.get("company_title")
                                 else:
-                                    deal_data = await self.get_deal_from_hubspot(deal_id)
+                                    deal_data = None
+                                    if deal_id:
+                                        deal_data = await self.get_deal_from_hubspot(deal_id)
                                     if deal_data:
                                         deal_title = deal_data["properties"].get("dealname")
                                         company_ids = list(

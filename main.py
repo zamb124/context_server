@@ -398,7 +398,7 @@ async def summarize_documents(docs: List[str], question: str, summarizer) -> Lis
     total_output_length = sum(len(doc) for doc in summarized_docs)
     end_time = perf_counter()
     total_time = end_time - start_time
-    logging.info(f"Завершено summarize_documents. Общее время выполнения: {total_time:.4f} секунд, Общее количество символов на выходе: {total_output_length}")
+    logging.info(f"Завершено summarize_documents. Общее время выполнения: {total_time:.4f} секунд, Общее количество символов на выходе: {total_output_length} было: {total_input_length}")
     return summarized_docs
 
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])

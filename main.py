@@ -2,20 +2,20 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
 import signal
 import sqlite3
-import ssl
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from typing import Dict, Optional, Any, List, Coroutine
+from time import perf_counter
+from typing import Dict, Optional, Any, List
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 import fasttext
 import nltk
 import torch
-import torch.multiprocessing as mp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header, status, Body, Depends
 from pydantic import BaseModel
@@ -58,13 +58,6 @@ try:
 except LookupError:
     nltk.download('stopwords')
     stop_words = set(stopwords.words('english'))  # Или 'english'
-
-# --- FastAPI App ---
-# Глобальные переменные для хранения пула процессов и очереди задач
-NUM_MODELS = 5  # Максимальное количество процессов
-model_name = "t5-base"  # Имя модели для загрузки
-global summarizer
-process_pool: mp.Pool = None  # Объявляем process_pool глобально
 
 # --- FastAPI App ---
 app = FastAPI()
@@ -186,11 +179,12 @@ def transform_where_clause(where: Dict[str, Any]) -> Dict[str, Any]:
     return transformed_where if transformed_where else {}
 
 
-def filter_context_with_summarization(question: str, context: str, summarizer) -> str:
+async def filter_context_with_summarization(question: str, context: str, summarizer) -> str:
     """
     Фильтрует контекст, генерируя краткое резюме, отвечающее на вопрос,
     и удаляет слова из вопроса из ответа. Использует чанкинг для обработки больших контекстов.
     """
+    start_time = perf_counter()  # Засекаем время
     logging.info(f"Начала filter_context_with_summarization. Длина контекста: {len(context)}")
 
     def detect_language(context: str) -> str:
@@ -236,9 +230,6 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
                 input_text,
                 max_length=max_length,
                 min_length=min_length,
-                do_sample=True,
-                truncation=True,  # Важно добавить truncation
-                temperature=0.2  # Устанавливаем температуру
             )[0]['generated_text']
         except Exception as e:
             logging.error(f"Ошибка при вызове summarizer: {e}")
@@ -271,60 +262,9 @@ def filter_context_with_summarization(question: str, context: str, summarizer) -
 
     filtered_summary = intro + filtered_summary
 
-    logging.info("Завершение filter_context_with_summarization")
+    end_time = perf_counter()
+    logging.info(f"Завершение filter_context_with_summarization. Время выполнения: {end_time - start_time:.4f} секунд")
     return filtered_summary
-
-
-async def run_sync_in_executor(func, *args, **kwargs):
-    """Запускает синхронную функцию в экзекуторе, чтобы избежать блокировки цикла событий."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func, *args, **kwargs)
-
-
-# --- Фоновые задачи ---
-async def summarize_context_async(question: str, context: str) -> str:
-    """Асинхронно суммирует один контекст."""
-    global summarizer
-    try:
-        return filter_context_with_summarization(question, context, summarizer)
-    except Exception as e:
-        logging.error(f"Ошибка суммирования контекста: {e}")
-        traceback.print_exc()
-        return ""  # Return an empty string or handle the error as needed
-
-
-def summarize_context_in_process(question: str, context: str, summarizer):
-    """Функция-обертка для запуска в отдельном процессе."""
-    try:
-        # Run filter_context_with_summarization in an executor to avoid blocking
-        return asyncio.run(run_sync_in_executor(filter_context_with_summarization, question, context, summarizer))
-    except Exception as e:
-        logging.error(f"Ошибка суммирования контекста в процессе: {e}")
-        return ""
-
-async def summarize_context_async_wrapper(question: str, context: str, summarizer):
-    """Обертка для запуска в отдельном потоке."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, summarize_context_in_process, question, context, summarizer)
-
-async def parallel_summarize_async(question: str, contexts: List[str]) -> List[str]:
-    """Асинхронно суммирует список контекстов с использованием пула процессов."""
-    if not isinstance(contexts, list):
-        raise TypeError(f"Expected list, but got {type(contexts)}")
-    for context in contexts:
-        if not isinstance(context, str):
-            raise TypeError(f"Expected string in list, but got {type(context)}")
-
-    global process_pool  # Используем глобальный пул процессов
-    global summarizer
-
-    # Create a list of tasks
-    tasks = [summarize_context_async_wrapper(question, context, summarizer) for context in contexts]
-
-    # Use asyncio.gather to run tasks concurrently
-    summarized_contexts = await asyncio.gather(*tasks)
-
-    return summarized_contexts
 
 
 # --- Модели ---
@@ -433,6 +373,32 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+async def summarize_documents(docs: List[str], question: str, summarizer) -> List[str]:
+    """Summarizes a list of documents using the summarizer."""
+    start_time = perf_counter()
+    logging.info(f"Начало summarize_documents. Количество документов: {len(docs)}")
+
+    summarized_docs = []
+    for i, doc in enumerate(docs):
+        doc_start_time = perf_counter()
+        try:
+            logging.info(f"Суммирование документа {i+1}/{len(docs)}. Длина документа: {len(doc)}")
+            summarized_text = await filter_context_with_summarization(question, doc, summarizer)
+            summarized_docs.append(summarized_text)
+            doc_end_time = perf_counter()
+            logging.info(f"Документ {i+1} успешно суммирован за {doc_end_time - doc_start_time:.4f} секунд. Длина результата: {len(summarized_text)}")
+
+        except Exception as e:
+            logging.error(f"Ошибка при суммировании документа {i+1}: {e}")
+            traceback.print_exc()
+            summarized_docs.append("")  # Handle error by returning an empty string
+
+    end_time = perf_counter()
+    total_time = end_time - start_time
+    logging.info(f"Завершено summarize_documents. Общее время выполнения: {total_time:.4f} секунд")
+    return summarized_docs
+
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])
 async def query_documents(query: Query):
     """
@@ -501,11 +467,10 @@ async def query_documents(query: Query):
         combined_documents.append(combined_document)
 
     if query.summarize:
-        len_before = sum([len(doc) for doc in combined_documents])
-        # Параллельная фильтрация контекста
-        combined_documents = await parallel_summarize_async(query.text, combined_documents)
-        len_after = sum([len(doc) for doc in combined_documents])
-        logging.info(f"Длина контекста до суммирования: {len_before}, после: {len_after}")
+        # Use the summarization model to compress the combined documents
+        summarizer = app.state.summarizer
+        combined_documents = await summarize_documents(combined_documents, query.text, summarizer)
+
     # Возвращаем только отфильтрованный контекст
     return ContextResponse(results=combined_documents)
 
@@ -515,7 +480,9 @@ async def summarize_context_endpoint(query: CompressContextRequest):
     """Compresses the given context based on the question using a summarization model.
     Splits the context into chunks suitable for the summarization model.
     """
-    combined_documents = await parallel_summarize_async(query.question, query.contexts)
+    summarizer = app.state.summarizer  # Access the summarizer from app state
+
+    combined_documents = await summarize_documents(query.contexts, query.question, summarizer)
     return ContextResponse(results=combined_documents)
 
 
@@ -564,37 +531,38 @@ async def hubspot_webhook(request: Request):
 
 
 # --- Lifespan ---
+async def init_summarizer(model_name: str):
+    """Инициализирует summarizer асинхронно."""
+    try:
+        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
+        logging.info(f"Model initialized: {model_name}")
+        return summarizer
+    except Exception as e:
+        logging.error(f"Error initializing model: {e}")
+        raise
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Lifespan event handler.
     """
-    global summarizer
-    global process_pool
-
-    # Initialize the summarizer model
+    # Initialize the summarizer
     try:
-        summarizer = pipeline("text2text-generation", model=model_name, device="cpu")
-        logging.info(f"Model initialized: {model_name}")
+        app.state.summarizer = await init_summarizer("t5-base")
     except Exception as e:
-        logging.error(f"Error initializing model: {e}")
+        logging.error(f"Failed to initialize summarizer: {e}")
+        # Handle the error appropriately, possibly exiting the application
         raise
 
-    # Initialize the process pool
-    process_pool = mp.Pool(NUM_MODELS)  # Создаем пул процессов
-
     # Start telegram integration
-    asyncio.create_task(telegram_integration.start())
+    #asyncio.create_task(telegram_integration.start()) #TODO: раскоментировать
 
     yield
 
     # Stop telegram integration
-    await telegram_integration.stop()
+    #await telegram_integration.stop()
 
-    # Close the process pool
-    process_pool.close()
-    process_pool.join()
-    logging.info("Process pool closed.")
+    logging.info("Application shutdown.")
 
 
 app.router.lifespan_context = lifespan  # Assign lifespan to the app
@@ -606,7 +574,7 @@ async def handle_exit():
     Обработчик завершения работы приложения.
     Сохраняет данные перед выходом.
     """
-    logging.info("Завершение работы: сохранение данных...")
+    logging.info("Завершение работы приложения. Сохранение данных...")
     try:
         await telegram_integration.sync_save_all_telegram_messages_to_files()
         logging.info("Данные Telegram сохранены.")
@@ -646,6 +614,6 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "true"  # Установить параллелизм для токенизаторов
     nltk.download('bcp47', quiet=True)
     nltk.download('stopwords')
-    nltk.download('punkt_tab')
+    nltk.download('punkt')
     register_signal_handlers()
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8001, workers=4)  # Adjust workers as needed

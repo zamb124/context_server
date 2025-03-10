@@ -377,7 +377,8 @@ async def add_document(request_data: AddDocumentRequest = Body(...)):
 async def summarize_documents(docs: List[str], question: str, summarizer) -> List[str]:
     """Summarizes a list of documents using the summarizer."""
     start_time = perf_counter()
-    logging.info(f"Начало summarize_documents. Количество документов: {len(docs)}")
+    total_input_length = sum(len(doc) for doc in docs)
+    logging.info(f"Начало summarize_documents. Количество документов: {len(docs)}, Общее количество символов на входе: {total_input_length}")
 
     summarized_docs = []
     for i, doc in enumerate(docs):
@@ -394,9 +395,10 @@ async def summarize_documents(docs: List[str], question: str, summarizer) -> Lis
             traceback.print_exc()
             summarized_docs.append("")  # Handle error by returning an empty string
 
+    total_output_length = sum(len(doc) for doc in summarized_docs)
     end_time = perf_counter()
     total_time = end_time - start_time
-    logging.info(f"Завершено summarize_documents. Общее время выполнения: {total_time:.4f} секунд")
+    logging.info(f"Завершено summarize_documents. Общее время выполнения: {total_time:.4f} секунд, Общее количество символов на выходе: {total_output_length}")
     return summarized_docs
 
 @app.post("/query", response_model=ContextResponse, dependencies=[Depends(verify_token)])

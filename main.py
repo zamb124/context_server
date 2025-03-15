@@ -485,7 +485,7 @@ async def start_model_process() -> dict:
     """
     queue = asyncio.Queue()
     process = await asyncio.create_subprocess_exec(
-        "python", "model_process.py",
+        "python", "/home/viktor-shved/context_server/model_process.py",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE

@@ -5,6 +5,10 @@ import pycountry
 from pydantic import BaseModel, Field, field_validator
 
 
+# =============================================================================
+#                         Модели данных
+# =============================================================================
+
 class Category(Enum):
     SALES = 'sales'
     OPS = 'ops'
@@ -66,6 +70,8 @@ class ValidatedTelegramMetadata(BaseMetadata):
 class ValidLabels(str, Enum):
     hubspot = "hubspot"
     telegram = "telegram_sales"
+    telegram_ops = "telegram_ops"
+    telegram_product = "telegram_product"
     wiki = "wiki"
     startrek = "startrek"
 
@@ -80,7 +86,7 @@ class Query(BaseModel):
     summarize: bool = Field(default=False, description="Флаг суммаризации, если нужно ")
     labels: List[ValidLabels] = Field(
         description="Указать доступные коллекции где производить поиск")  # Обязательный атрибут labels
-    n_results: int = Field(default=5, ge=1, le=300, description="Количество результатов для возврата")
+    n_results: int = Field(default=5, ge=1, le=1000, description="Количество результатов для возврата")
     where: Optional[Dict[str, Any]] = Field(default=None, description="Фильтры по метаданным")
 
 
@@ -90,3 +96,23 @@ class ContextResponse(BaseModel):
 
 class ForceSaveResponse(BaseModel):
     message: str
+
+
+class AddDocumentRequest(BaseModel):
+    """
+    Модель запроса для добавления документа в векторное хранилище.
+    """
+    text: str
+    label: ValidLabels
+    document_id: Optional[str] = None
+    metadata: DocumentBase
+    chunk: Optional[bool] = True
+    author: Optional[str] = None
+
+
+class CompressContextRequest(BaseModel):
+    """
+    Модель запроса для сжатия (summarization) контекста.
+    """
+    question: str = ''
+    contexts: list

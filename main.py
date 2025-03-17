@@ -484,12 +484,20 @@ async def start_model_process() -> dict:
     Возвращает словарь с процессом и очередью запросов.
     """
     queue = asyncio.Queue()
-    process = await asyncio.create_subprocess_exec(
-        "/home/viktor-shved/context_server/venv/bin/python", "model_process.py",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "/home/viktor-shved/context_server/venv/bin/python", "model_process.py",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+    except Exception as ex:
+        process = await asyncio.create_subprocess_exec(
+            "python", "model_process.py",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
     logging.info(f"Запущен процесс модели с PID: {process.pid}")
 
     # Ожидаем сигнал готовности от процесса модели

@@ -18,6 +18,7 @@ class Category(Enum):
 class DocumentType(Enum):
     TELEGRAMM_MESSAGE = 'telegramm_message'
     OPS_DOCUMENT = 'ops_document'
+    USER_MANUAL = 'user_manual'
     OPENAPI_SPEC = 'openapi_spec'
     COMPANY = 'company'
     EMAIL = 'email'
@@ -74,6 +75,7 @@ class ValidLabels(str, Enum):
     telegram_product = "telegram_product"
     wiki = "wiki"
     startrek = "startrek"
+    manual = "manual"
 
 
 # --- Модели данных ---

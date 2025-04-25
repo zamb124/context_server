@@ -116,5 +116,5 @@ class CompressContextRequest(BaseModel):
     """
     Модель запроса для сжатия (summarization) контекста.
     """
-    question: str = ''
+    question: str
     contexts: list

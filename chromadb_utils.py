@@ -63,7 +63,7 @@ def _process_contains(key: str, search_string: str) -> Dict[str, Any]:
               CAST(bool_value AS TEXT) LIKE lower(?)
           )
     """
-    cursor.execute(query, (key, f'%{search_string}%', f'%{search_string}%', f'%{search_string}%', f'%{search_string}%'))
+    cursor.execute(query, (key, f'%{search_string.lower()}%', f'%{search_string.lower()}%', f'%{search_string.lower()}%', f'%{search_string}%'))
     values = [row['value'] for row in cursor.fetchall() if row['value'] is not None]
     conn.close()
 

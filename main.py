@@ -366,8 +366,9 @@ async def summarize_document(doc: str, question: str, model: SummarizerModel) ->
         return "" # Ничего суммировать
 
     try:
+        text = f'Summarizing the text, but the main goal is not to shorten, but to leave what is necessary to answer the question:\n{doc} \n\nQuestion: {question}'
         # Запускаем синхронный метод model.summarize в отдельном потоке
-        summary = await asyncio.to_thread(model.summarize, doc)
+        summary = await asyncio.to_thread(model.summarize, text)
         return summary
     except Exception as e:
         logger.error(f"Ошибка во время вызова summarize_document: {e}")

@@ -90,7 +90,7 @@ try:
 except LookupError:
     nltk.download('punkt')
 
-MODEL_NAME = "csebuetnlp/mT5_multilingual_XLSum"
+MODEL_NAME = "bigscience/mt0-large"
 
 def clean_text(text, lang='en'):
     """
@@ -129,7 +129,7 @@ class SummarizerModel:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             device = 0 if torch.cuda.is_available() else -1
             # Используем правильный pipeline для задачи
-            self.pipeline = pipeline("summarization", model=self.model_name, tokenizer=self.tokenizer, device=device) # Передаем загруженный токенизатор
+            self.pipeline = pipeline("text2text-generation", model=self.model_name, tokenizer=self.tokenizer, device=device) # Передаем загруженный токенизатор
             device_name = "cuda" if device == 0 else "cpu"
             logger.info(f"Модель {self.model_name} (Summarization) успешно загружена на {device_name}")
         except Exception as e:
@@ -152,7 +152,7 @@ class SummarizerModel:
             # Для mT5 XLSum, фактический лимит может быть ниже, проверим токенизацией
             # Вместо жесткого лимита 512, попробуем положиться на pipeline, но для очень больших текстов все равно нужно чанкование
             # Давайте оставим логику чанкования, но с лимитом токенов токенизатора
-            max_tokens_per_chunk = self.tokenizer.model_max_length # Обычно 512 или 1024
+            max_tokens_per_chunk = 1023 # Обычно 512 или 1024
 
             # Токенизация для проверки длины (без паддинга и усечения здесь)
             inputs = self.tokenizer(text, return_tensors=None, truncation=False) # Не тензоры, просто токены
@@ -186,7 +186,7 @@ class SummarizerModel:
                     continue
                 # Используем pipeline для каждого чанка
                 chunk_summary_result = self.pipeline(chunk, max_length=max_length, min_length=min_length, truncation=True)
-                chunk_summary = chunk_summary_result[0]['summary_text']
+                chunk_summary = chunk_summary_result[0]['generated_text']
                 summaries.append(chunk_summary)
                 logger.info(f"Чанк {idx + 1}/{len(chunks_texts)} суммаризован. Длина summary: {len(chunk_summary)}")
 
@@ -366,7 +366,7 @@ async def summarize_document(doc: str, question: str, model: SummarizerModel) ->
         return "" # Ничего суммировать
 
     try:
-        text = f'Summarizing the text, but the main goal is not to shorten, but to leave what is necessary to answer the question:\n{doc} \n\nQuestion: {question}'
+        text = f'Summarizing the text,don\'t cut out dates or other key information, but the main goal is not to shorten, but to leave what is necessary to answer the question:\n{doc} \n\nQuestion: {question}'
         # Запускаем синхронный метод model.summarize в отдельном потоке
         summary = await asyncio.to_thread(model.summarize, text)
         return summary

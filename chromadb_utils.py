@@ -5,7 +5,7 @@ from typing import Dict, Any
 import chromadb
 from chromadb.utils import embedding_functions
 
-EMBEDDING_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-large"
 CHROMA_DB_PATH = "chroma_db"
 
 sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(

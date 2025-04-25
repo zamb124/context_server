@@ -178,6 +178,7 @@ async def summarize_document(doc: str, question: str, app: FastAPI) -> str:
     if result.get("status") == "success":
         return result.get("summary", "")
     else:
+        traceback.print_exc()
         logging.error(f"Ошибка при суммировании документа: {result.get('error', 'Unknown error')}")
         return ""
 
@@ -247,7 +248,7 @@ async def query_documents(query: Query, request: Request):
     # Группируем чанки по source_document_id
     grouped_results = {}
     for item in all_results:
-        if item['distance'] < 10:  # Фильтрация по максимальному расстоянию
+        if item['distance'] < 15:  # Фильтрация по максимальному расстоянию
             source_document_id = item['metadata']['source_document_id']
             if source_document_id not in grouped_results:
                 grouped_results[source_document_id] = {
@@ -426,7 +427,11 @@ async def handle_model_requests(process: asyncio.subprocess.Process, queue: asyn
     - Отправляет запрос в процесс модели через stdin.
     - Ожидает ответа через stdout.
     - Возвращает результат через future.
+    - Мониторит stdout процесса и логирует все выходные данные.
     """
+    # Создаем задачу для мониторинга stdout
+    #monitor_task = asyncio.create_task(monitor_stdout(process))
+
     try:
         while process.returncode is None:
             request, future = await queue.get()
@@ -436,6 +441,8 @@ async def handle_model_requests(process: asyncio.subprocess.Process, queue: asyn
                 await process.stdin.drain()
 
                 response_line = await process.stdout.readline()
+                decoded_line = response_line.decode().strip()
+                logging.info(f"Процесс {process.pid} stdout: {decoded_line}")
                 if not response_line:
                     result = {"status": "error", "error": "No response from process"}
                 else:
@@ -453,8 +460,39 @@ async def handle_model_requests(process: asyncio.subprocess.Process, queue: asyn
             queue.task_done()
     except asyncio.CancelledError:
         logging.info(f"Обработка запросов для процесса {process.pid} отменена.")
+        # Отменяем задачу мониторинга
+        #monitor_task.cancel()
     except Exception as e:
         logging.error(f"Ошибка в обработчике запросов для процесса {process.pid}: {e}")
+        # Отменяем задачу мониторинга
+        #monitor_task.cancel()
+    finally:
+        pass
+        # Дополнительная проверка для отмены задачи мониторинга
+        #if not monitor_task.done():
+            #monitor_task.cancel()
+
+
+async def monitor_stdout(process: asyncio.subprocess.Process):
+    """
+    Мониторит stdout процесса и логирует любой вывод.
+    """
+    try:
+        while process.returncode is None:
+            line = await process.stdout.readline()
+            if line:
+                decoded_line = line.decode().strip()
+                logging.info(f"Процесс {process.pid} stdout: {decoded_line}")
+            else:
+                # Если вернулась пустая строка, возможно, процесс завершился
+                await asyncio.sleep(0.1)
+    except asyncio.CancelledError:
+        traceback.print_exc()
+        logging.info(f"Мониторинг stdout для процесса {process.pid} отменен.")
+    except Exception as e:
+        traceback.print_exc()
+        logging.error(f"Ошибка при мониторинге stdout процесса {process.pid}: {e}")
+
 
 
 async def send_model_request(request: dict, process_handler: dict) -> dict:

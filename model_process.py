@@ -42,7 +42,8 @@ try:
 except LookupError:
     nltk.download('stopwords')
     stop_words = set(stopwords.words('english'))  # Или 'english'
-
+MODEL_NAME = "csebuetnlp/mT5_multilingual_XLSum"
+#MODEL_NAME = 'mistralai/Mistral-Small-3.1-24B-Instruct-2503'
 
 def clean_text(text, lang='en'):
     """
@@ -55,7 +56,7 @@ def clean_text(text, lang='en'):
 
 
 class SummarizerModel:
-    def __init__(self, model_name="csebuetnlp/mT5_multilingual_XLSum"):
+    def __init__(self, model_name=MODEL_NAME):
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)

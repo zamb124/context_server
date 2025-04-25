@@ -488,11 +488,11 @@ if __name__ == "__main__":
     async def main():
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         access_token = config.HUBSPOT_API_KEY  # Замените своим фактическим токеном доступа.
-        output_directory = "hubspot_company_data"  # Каталог для хранения файлов компаний
+        output_directory = "111"  # Каталог для хранения файлов компаний
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
             # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = None
+            company_id_to_process = '19387888471'
             await extractor.process_all_companies(company_id_to_process)
         except Exception as e:
             logging.error(f"Во время обработки произошла ошибка: {e}")

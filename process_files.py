@@ -70,6 +70,11 @@ def process_file(filepath):
     }
     upload_data(company_data, filename, 'company', data)
 
+    if 'deals' in data and isinstance(data['deals'], list):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            executor.map(lambda call: upload_data(call, filename, 'deals', data), data['deals'])
+
+
     # Process contacts
     if 'contacts' in data and isinstance(data['contacts'], list):
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -93,6 +98,8 @@ def process_file(filepath):
     if 'meetings' in data and isinstance(data['meetings'], list):
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             executor.map(lambda call: upload_data(call, filename, 'meetings', data), data['meetings'])
+
+
 
     logging.info(f"Файл {filepath} успешно обработан.")
 
@@ -125,7 +132,8 @@ def upload_data(item, filename, item_type, source_data):
     metadata['id'] = document_id
     metadata['type'] = item['type']
     metadata['create_date'] = datetime.fromisoformat(item.get('create_date', '2021-01-01T00:00:00.000Z')).timestamp()
-
+    if item_type == 'deal':
+        a=1
     data_to_send = {
         "text": '\n'.join([f'{k}: {v}' for k,v in item.items()]), # The entire item data as a JSON string
         "label": "hubspot",
@@ -149,7 +157,7 @@ def upload_data(item, filename, item_type, source_data):
             data_to_send['text'] += text
 
 
-    url = 'https://foodforce.tech/add_document/'
+    url = 'http://localhost:8001/add_document'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
     # Send request with retries
@@ -190,12 +198,12 @@ def main():
     """
     Main function to iterate through files and process them.
     """
-    directory = "111"
+    directory = "hubspot_data"
     files = [os.path.join(directory, filename) for filename in os.listdir(directory) if filename.endswith(".json")]
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         executor.map(process_file, files)
 
     logging.info("Основной процесс завершен.")

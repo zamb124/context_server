@@ -15,17 +15,17 @@ def clean_text(text: str) -> str:
     """Удаляет технические символы, такие как \n, \t, \r, HTML теги, а также символ >."""
     if text is None:
         return ""
+    text = re.sub(r"<[^>]+>", "", text)
     text = re.sub(r"[\n\t\r]", " ", text).strip()
-    text = re.sub(r"<[^>]+>", "", text)  # Удаление HTML тегов
     if not text:
         text = ''
-    text = text.replace(">", "")  # Удаление символа >
+    text = text.replace(">", "")
     return text
 
 
 note_map = {
     'hs_timestamp': 'create_date',
-'id': 'id',
+    'id': 'id',
     'hs_note_body': 'text',
 }
 email_map = {
@@ -41,19 +41,21 @@ email_map = {
     'hs_email_to_lastname': 'to_lastname',
 }
 deal_map = {
-    'hs_timestamp': 'create_date',
-'id': 'id',
+    'hs_timestamp': 'create_date_hs',
+    'id': 'id',
     'amount': 'amount',
     'closedate': 'close_date',
     'dealname': 'deal_name',
     'pipeline': 'pipeline',
     'dealstage': 'deal_stage',
-    'geography': 'geography'
+    'geography': 'geography',
+    'createdate': 'create_date',
+    'telegram_group': 'telegram_invite_link'
 }
 
 call_map = {
     'hs_timestamp': 'create_date',
-'id': 'id',
+    'id': 'id',
     'hs_call_body': 'body',
     'hs_call_direction': 'call_direction',
     'hs_call_duration': 'call_duration',
@@ -64,14 +66,14 @@ call_map = {
 }
 task_map = {
     'hs_timestamp': 'create_date',
-'id': 'id',
+    'id': 'id',
     'hs_task_body': 'text',
     'hs_task_subject': 'subject',
     'hs_task_type': 'type'
 }
 meeting_map = {
     'hs_timestamp': 'create_date',
-'id': 'id',
+    'id': 'id',
     'hs_meeting_title': 'title',
     'hs_meeting_body': 'body',
     'hs_meeting_location': 'location',
@@ -79,16 +81,16 @@ meeting_map = {
     'hs_meeting_end_time': 'end_time'
 }
 activities_maps = {
-            'note': note_map,
-            'email': email_map,
-            'deal': deal_map,
-            'call': call_map,
-            'task': task_map,
-            'meeting': meeting_map
-        }
+    'note': note_map,
+    'email': email_map,
+    'deal': deal_map,
+    'call': call_map,
+    'task': task_map,
+    'meeting': meeting_map
+}
 
 
-class HubSpotDataExtractor:  # Переименованный класс для ясности и цели
+class HubSpotDataExtractor:
     BASE_URL = "https://api.hubapi.com/crm/v3/objects"
 
     def __init__(self, access_token: str, output_dir: str = "hubspot_data"):
@@ -97,408 +99,344 @@ class HubSpotDataExtractor:  # Переименованный класс для 
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
         }
-        self.client = httpx.AsyncClient(headers=self.headers, timeout=30)  # Увеличенное время ожидания
+        self.client = httpx.AsyncClient(headers=self.headers, timeout=httpx.Timeout(30.0, connect=10.0))
         self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)  # Создать выходной каталог
-        self.max_retries = 3  # Максимальное количество повторных попыток для вызовов API
-        self.retry_delay = 5  # Задержка в секундах перед повторной попытки
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.max_retries = 3
+        self.retry_delay = 5
 
     async def _fetch_data(self, url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Вспомогательная функция для получения данных с повторными попытками."""
         for attempt in range(self.max_retries):
             try:
                 response = await self.client.get(url, params=params)
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as e:
-                logging.error(f"Ошибка HTTP {e.response.status_code} для URL {url}: {e.response.text}")
-                if e.response.status_code == 429:  # Превышение лимита запросов
+                logging.error(f"Ошибка HTTP {e.response.status_code} для URL {url} с параметрами {params}: {e.response.text}")
+                if e.response.status_code == 429:
+                    retry_after = int(e.response.headers.get("Retry-After", self.retry_delay))
                     logging.warning(
-                        f"Превышен лимит запросов. Повторная попытка через {self.retry_delay} секунд (попытка {attempt + 1}/{self.max_retries})")
+                        f"Превышен лимит запросов. Повторная попытка через {retry_after} секунд (попытка {attempt + 1}/{self.max_retries})")
+                    await asyncio.sleep(retry_after)
+                elif 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                    logging.error(f"Непоправимая ошибка клиента: {e}") # Не повторяем для большинства ошибок 4xx
+                    return None
+                else: # Серверные ошибки 5xx или другие HTTPStatusError, которые можно повторить
+                    logging.warning(
+                        f"Ошибка сервера или сети ({e.response.status_code}). Повторная попытка через {self.retry_delay} секунд (попытка {attempt + 1}/{self.max_retries})")
+                    await asyncio.sleep(self.retry_delay)
+            except httpx.RequestError as e: # Ошибки сети, таймауты и т.д.
+                logging.error(f"Ошибка запроса для URL {url} с параметрами {params}: {type(e).__name__} - {e}")
+                if attempt < self.max_retries - 1:
+                    logging.warning(
+                        f"Повторная попытка через {self.retry_delay} секунд (попытка {attempt + 1}/{self.max_retries})")
                     await asyncio.sleep(self.retry_delay)
                 else:
-                    logging.error(f"Непоправимая ошибка: {e}")
-                    return None  # Непоправимая ошибка
-            except httpx.RequestError as e:
+                    logging.error(f"Не удалось выполнить запрос к {url} после {self.max_retries} попыток.")
+                    return None
+            except json.JSONDecodeError as e: # Ошибка парсинга JSON
+                logging.error(f"Ошибка декодирования JSON ответа с URL {url}: {e}")
+                # Логируем часть ответа для диагностики, если он есть
+                raw_response_text = response.text if 'response' in locals() and hasattr(response, 'text') else 'Ответ не получен или недоступен'
+                logging.error(f"Текст ответа (первые 500 символов): {raw_response_text[:500]}")
+                return None # Непоправимая ошибка
+            except Exception as e: # Другие непредвиденные ошибки
+                logging.error(f"Произошла непредвиденная ошибка при запросе к {url}: {e}")
                 logging.error(traceback.format_exc())
-                logging.error(f"Ошибка запроса для URL {url}: {e}")
-                logging.warning(
-                    f"Повторная попытка через {self.retry_delay} секунд (попытка {attempt + 1}/{self.max_retries})")
-                await asyncio.sleep(self.retry_delay)
-            except Exception as e:
-                logging.error(f"Произошла непредвиденная ошибка: {e}")
-                logging.error(traceback.format_exc())
-                return None  # Непоправимая ошибка
-
-        logging.error(f"Не удалось получить данные из {url} после {self.max_retries} попыток.")
+                return None
+        logging.error(f"Не удалось получить данные из {url} после {self.max_retries} попыток (все попытки исчерпаны).")
         return None
 
     async def fetch_all(self, object_type: str, properties: Optional[List[str]] = None,
-                        associations: Optional[List[str]] = None, company_id: Optional[str] = None) -> List[
-        Dict[str, Any]]:
-        """
-        Извлекает все объекты определенного типа из HubSpot, обрабатывая пагинацию и ограничение скорости.
-        Теперь также поддерживает извлечение связанных объектов.
-        Добавлена возможность фильтрации по ID компании в коде.
-        """
-        url = f"{self.BASE_URL}/{object_type}{f'/{company_id}' if company_id else ''}"
-        params = {"limit": 100}
+                        associations: Optional[List[str]] = None, object_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        url = f"{self.BASE_URL}/{object_type}"
+        if object_id:
+            url = f"{url}/{object_id}"
+        params = {}
         if properties:
-            params["properties"] = ",".join(properties)
+            params["properties"] = ",".join(list(set(properties)))
         if associations:
-            params["associations"] = ",".join(associations)
-
+            params["associations"] = ",".join(list(set(associations)))
         results = []
+        if object_id:
+            data = await self._fetch_data(url, params=params)
+            if data:
+                results.append(data)
+            return results
+        params["limit"] = 100
         after = None
         while True:
+            current_params = params.copy()
             if after:
-                params["after"] = after
-
-            data = await self._fetch_data(url, params=params)
-            if data is None:  # Выйти, если получение полностью не удалось
+                current_params["after"] = after
+            data = await self._fetch_data(url, params=current_params)
+            if data is None:
                 break
-            if company_id:
-                results.append(data)
+            results.extend(data.get("results", []))
+            paging_next = data.get("paging", {}).get("next")
+            if paging_next and paging_next.get("after"):
+                after = paging_next["after"]
             else:
-                results.extend(data.get("results", []))
-
-
-            after = data.get("paging", {}).get("next", {}).get("after")
-            if not after:
                 break
         return results
 
     async def get_company_data(self, company_id: str) -> Dict[str, Any]:
-        """
-        Извлекает исчерпывающие данные для одной компании, включая связанные контакты и действия.
-        """
-        company_properties = ["name", "domain", "industry", "phone", "website", "description", "contacts",
-                              "activites", "deals", "geography", "country", "city","hs_timestamp"]  # Добавлено описание
-        # Изменяем вызов fetch_all, чтобы вернуть только одну компанию по ID
+        company_properties = ["name", "domain", "industry", "phone", "website", "description",
+                              "geography", "country", "city", "hs_timestamp", "createdate"]
+        unique_company_properties = list(set(company_properties))
         url = f"{self.BASE_URL}/companies/{company_id}"
-        params = {"properties": ",".join(company_properties),
+        params = {"properties": ",".join(unique_company_properties),
                   "associations": "contacts,notes,emails,deals,calls,tasks,meetings"}
         data = await self._fetch_data(url, params=params)
         if not data:
-            logging.warning(f"Компания с ID {company_id} не найдена")
+            logging.warning(f"Компания с ID {company_id} не найдена или не удалось получить данные.")
             return {}
-
-        company_data = {
-            "id": data["id"],
-            "properties": data["properties"],
+        return {
+            "id": data.get("id"),
+            "properties": data.get("properties", {}),
             "associations": data.get("associations", {})
         }
-        return company_data
 
     async def get_associated_contacts(self, contacts_ids: List[str]) -> List[Dict[str, Any]]:
-        """Получает информацию о конкретных контактах по их ID."""
         contacts = []
-        for contact_id in contacts_ids:
+        contact_properties = ["firstname", "lastname", "email", "phone", "jobtitle",
+                              "hs_timestamp", "createdate"]
+        unique_contact_properties = list(set(contact_properties))
+        # Уникализация ID контактов перед запросом
+        unique_contacts_ids_to_fetch = list(set(cid for cid in contacts_ids if cid))
+
+        for contact_id in unique_contacts_ids_to_fetch:
+            # if not contact_id: # Эта проверка уже сделана при создании unique_contacts_ids_to_fetch
+            #     logging.warning("Обнаружен пустой ID контакта, пропуск.")
+            #     continue
             try:
                 url = f"{self.BASE_URL}/contacts/{contact_id}"
-                params = {"properties": "firstname,lastname,email,phone,jobtitle,hs_timestamp"}
+                params = {"properties": ",".join(unique_contact_properties)}
                 data = await self._fetch_data(url, params=params)
-
                 if data:
                     contacts.append({
-                        "id": data["id"],
-                        "properties": data["properties"]
+                        "id": data.get("id"),
+                        "properties": data.get("properties", {})
                     })
                 else:
-                    logging.warning(f"Контакт с ID {contact_id} не найден.")
+                    logging.warning(f"Контакт с ID {contact_id} не найден или не удалось получить данные.")
             except Exception as e:
-                logging.error(traceback.format_exc())
                 logging.error(f"Ошибка при получении контакта с ID {contact_id}: {e}")
+                logging.error(traceback.format_exc())
         return contacts
 
     async def get_associated_activities(self, company_data: dict) -> List[Dict[str, Any]]:
-        """
-        Получает связанные действия (заметки, электронные письма, звонки, задачи, встречи) для компании,
-        запрашивая каждый объект по ID.
-        """
         associated_activities = []
+        associations_data = company_data.get("associations", {})
+        if not associations_data:
+            logging.debug(f"Нет ассоциаций для компании ID {company_data.get('id')}")
+            return []
 
-        # Теперь получаем IDs связанных заметок (если они есть в company_data - adapt to your actual data!)
-        note_ids = [note.get("id") for note in company_data.get("associations", {}).get("notes", {}).get("results", []) if note]
-        email_ids = [email.get("id") for email in company_data.get("associations", {}).get("emails", {}).get("results", []) if email]
-        call_ids = [call.get("id") for call in company_data.get("associations", {}).get("calls", {}).get("results", []) if call]
-        task_ids = [task.get("id") for task in company_data.get("associations", {}).get("tasks", {}).get("results", []) if task]
-        meeting_ids = [meeting.get("id") for meeting in company_data.get("associations", {}).get("meetings", {}).get("results", []) if meeting]
-        deals_ids = [deal.get("id") for deal in company_data.get("associations", {}).get("deals", {}).get("results", []) if deal]
+        activity_types_map_config = {
+            "notes": ("notes", list(set(note_map.keys()))),
+            "emails": ("emails", list(set(email_map.keys()))),
+            "deals": ("deals", list(set(deal_map.keys()))),
+            "calls": ("calls", list(set(call_map.keys()))),
+            "tasks": ("tasks", list(set(task_map.keys()))),
+            "meetings": ("meetings", list(set(meeting_map.keys()))),
+        }
 
-        # Функция для получения информации об одном объекте по ID
-        async def get_activity_by_id(object_type: str, object_id: str, params: dict) -> Optional[Dict[str, Any]]:
-            url = f"{self.BASE_URL}/{object_type}/{object_id}"
+        async def get_activity_by_id(object_type_plural: str, object_id: str, props_to_fetch: List[str]) -> Optional[Dict[str, Any]]:
+            url = f"{self.BASE_URL}/{object_type_plural}/{object_id}"
+            props_to_fetch_cleaned = [p for p in props_to_fetch if p.lower() != 'id']
+            params = {"properties": ",".join(list(set(props_to_fetch_cleaned)))}
             data = await self._fetch_data(url, params=params)
             return data
 
-        # Получаем информацию о каждой заметке
-        for note_id in note_ids:
-            note = await get_activity_by_id(
-                "notes", note_id,
-                params={"properties": "hs_note_body,hs_timestamp"}
-            )
-            if note:
-                associated_activities.append({
-                    "type": "note",
-                    "id": note["id"],
-                    "properties": note["properties"]
-                })
+        for assoc_key, (activity_api_name, properties_list) in activity_types_map_config.items():
+            activity_refs = associations_data.get(assoc_key, {}).get("results", [])
 
-        # Получаем информацию о каждом email
-        for email_id in email_ids:
-            email = await get_activity_by_id(
-                "emails", email_id,
-                params={
-                    "properties": ",".join([i for i in email_map.keys()])
-                }
-            )
-            if email:
-                associated_activities.append({
-                    "type": "email",
-                    "id": email["id"],
-                    "properties": email["properties"]
-                })
-        # Получаем информацию о каждом deal
-        for deal_id in deals_ids:
-            deal = await get_activity_by_id(
-                "deals", deal_id,
-                params={
-                    "properties": ",".join([i for i in deal_map.keys()])
-                }
-            )
-            if deal:
-                associated_activities.append({
-                    "type": "deal",
-                    "id": deal["id"],
-                    "properties": deal["properties"]
-                })
+            # <--- НАЧАЛО ИЗМЕНЕНИЯ: Уникализация ID активностей перед запросом деталей
+            unique_activity_ids = list(set(
+                item.get("id") for item in activity_refs if item and item.get("id")
+            ))
+            # <--- КОНЕЦ ИЗМЕНЕНИЯ
 
-        # Получаем информацию о каждом звонке
-        for call_id in call_ids:
-
-            call = await get_activity_by_id(
-                "calls", call_id,
-                params={
-                    "properties": ",".join([i for i in call_map.keys()])
-                }
-            )
-            if call:
-                associated_activities.append({
-                    "type": "call",
-                    "id": call["id"],
-                    "properties": call["properties"]
-                })
-
-        # Получаем информацию о каждой задаче
-        for task_id in task_ids:
-
-            task = await get_activity_by_id(
-                "tasks", task_id,
-                params={
-                    "properties": ",".join([i for i in task_map.keys()])
-                }
-            )
-            if task:
-                associated_activities.append({
-                    "type": "task",
-                    "id": task["id"],
-                    "properties": task["properties"]
-                })
-
-        # Получаем информацию о каждой встрече
-        for meeting_id in meeting_ids:
-
-            meeting = await get_activity_by_id(
-                "meetings", meeting_id,
-                params={
-                    "properties": ",".join([i for i in meeting_map.keys()])
-                }
-            )
-            if meeting:
-                associated_activities.append({
-                    "type": "meeting",
-                    "id": meeting["id"],
-                    "properties": meeting["properties"]
-                })
-
+            for activity_id in unique_activity_ids: # Итерация по уникальным ID
+                activity_data = await get_activity_by_id(activity_api_name, activity_id, properties_list)
+                if activity_data:
+                    singular_type = activity_api_name.rstrip('s')
+                    associated_activities.append({
+                        "type": singular_type,
+                        "id": activity_data.get("id"),
+                        "properties": activity_data.get("properties", {})
+                    })
         return associated_activities
 
     async def process_attachments(self, company_data: Dict[str, Any]) -> List[str]:
-        """
-        Извлекает и обрабатывает вложения (документы), связанные с компанией,
-        подразумевая, что они хранятся как вложения в email.
-        Адаптируйте этот код к вашей структуре данных!
-        """
-        document_texts = []
-        email_ids = company_data.get("associations", {}).get("emails", {}).get("results", [])
-
-        # Функция для получения информации об email по ID
-        async def get_email_with_attachments(email_id: str) -> Optional[Dict[str, Any]]:
-            url = f"{self.BASE_URL}/emails/{email_id}"
-            params = {"properties": "hs_attachment_names,hs_attachment_urls"}  # Пример. Adapt!
-            data = await self._fetch_data(url, params=params)
-            return data
-
-        for email_id in email_ids:
-            email = await get_email_with_attachments(email_id.get("id"))
-            if email:
-                attachment_names = email["properties"].get("hs_attachment_names", "").split(";")  # Пример!
-                attachment_urls = email["properties"].get("hs_attachment_urls", "").split(";")  # Пример!
-
-                for i, attachment_url in enumerate(attachment_urls):
-                    attachment_name = attachment_names[i] if i < len(attachment_names) else "Unknown"
-                    try:
-                        # Загрузка и обработка документа
-                        if attachment_url:  # Проверяем, что URL не пустой
-                            async with self.client.get(attachment_url) as response:
-                                response.raise_for_status()
-                                file_content = await response.read()
-                                file_path = os.path.join(self.output_dir, attachment_name)
-                                with open(file_path, "wb") as f:
-                                    f.write(file_content)
-                                # elements = partition(filename=file_path) # убрал вызов несуществующей функции
-                                # text = "\n".join([element.text for element in elements])
-                                # document_texts.append(f"Документ: {attachment_name}\n{text}")
-                                # При желании удалите временный файл
-                                os.remove(file_path)
-                    except Exception as e:
-                        logging.error(traceback.format_exc())
-                        logging.error(
-                            f"Ошибка обработки документа {attachment_name} из {attachment_url}: {e}")
-        return document_texts
+        logging.info("Функция process_attachments требует детальной реализации согласно HubSpot API v3 для работы с файлами.")
+        return []
 
     def build_company_json(self, company_data: Dict[str, Any], contacts: List[Dict[str, Any]],
-                             activities: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Создает JSON-структуру данных компании, контактов и действий.
-        """
+                           activities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        company_props = company_data.get("properties", {})
+        current_company_id = company_data.get("id")
         company_json = {
-            "city": company_data["properties"].get("city", ""),
-            "create_date": company_data["properties"].get('createdate', ""),
-            "country": company_data["properties"].get("country", ""),
-            "name": company_data["properties"].get("name", "No Name"),
-            "industry": company_data["properties"].get("industry", ""),
-            "id": company_data["id"],
-            "domain": company_data["properties"].get("domain", ""),
-            "description": clean_text(company_data["properties"].get("description", "")),
+            "city": company_props.get("city", ""),
+            "create_date": company_props.get('createdate', company_props.get('hs_timestamp', "")),
+            "country": company_props.get("country", ""),
+            "name": company_props.get("name", "No Name Provided"),
+            "industry": company_props.get("industry", ""),
+            "id": current_company_id,
+            "domain": company_props.get("domain", ""),
+            "description": clean_text(company_props.get("description", "")),
             "type": "company",
-            "contacts": [],
-            "notes": [],
-            "emails": [],
-            "calls": [],
-            "tasks": [],
-            "meetings": [],
-            "deals": []
+            "contacts": [], "notes": [], "emails": [], "calls": [], "tasks": [], "meetings": [], "deals": []
         }
-
         for contact in contacts:
+            contact_props = contact.get("properties", {})
             contact_data = {
-                "name": f"{contact['properties'].get('firstname', '')} {contact['properties'].get('lastname', '')}",
-                "create_date": company_data["properties"].get('createdate', ""),
-                "job_title": contact['properties'].get('jobtitle', ''),
-                "email": contact['properties'].get('email', ''),
-                "phone": contact['properties'].get('phone', ''),
-                "type": "contact",
-                "id": contact['id']
-
+                "name": f"{contact_props.get('firstname', '')} {contact_props.get('lastname', '')}".strip(),
+                "create_date": contact_props.get('createdate', contact_props.get('hs_timestamp', "")),
+                "job_title": contact_props.get('jobtitle', ''), "email": contact_props.get('email', ''),
+                "phone": contact_props.get('phone', ''), "type": "contact", "id": contact.get('id')
             }
             company_json["contacts"].append(contact_data)
 
-
+        # Поскольку get_associated_activities теперь возвращает уникальные активности,
+        # дополнительная проверка на уникальность здесь не требуется.
         for activity in activities:
-            activity_type = activity["type"]
-            properties = activity["properties"]
-            activities_map = activities_maps.get(activity_type)
-            new_activity = {}
-            for k, v in activities_map.items():
-                new_activity[v] = clean_text(properties.get(k, ""))
-            new_activity["type"] = activity_type
-            new_activity['id'] = activity['id']
-            company_json[activity_type + "s"].append(new_activity)
-
-
+            activity_type = activity.get("type")
+            if not activity_type:
+                logging.warning(f"Активность без типа пропущена: {activity}")
+                continue
+            properties = activity.get("properties", {})
+            activities_map_for_type = activities_maps.get(activity_type)
+            if not activities_map_for_type:
+                logging.warning(f"Не найдена карта свойств для типа активности: {activity_type}")
+                continue
+            new_activity_obj = {}
+            for hubspot_prop, json_key in activities_map_for_type.items():
+                raw_value = properties.get(hubspot_prop)
+                if json_key == 'telegram_invite_link' or hubspot_prop == 'id' or 'url' in json_key.lower():
+                    new_activity_obj[json_key] = str(raw_value) if raw_value is not None else ""
+                else:
+                    new_activity_obj[json_key] = clean_text(str(raw_value) if raw_value is not None else "")
+            new_activity_obj["type"] = activity_type
+            if 'id' not in new_activity_obj or not new_activity_obj['id']:
+                new_activity_obj['id'] = activity.get('id')
+            if activity_type == 'deal':
+                new_activity_obj['associated_company_id'] = current_company_id
+            target_key = activity_type + "s"
+            if target_key not in company_json:
+                if activity_type in company_json: target_key = activity_type
+                else:
+                    logging.warning(f"Не удалось найти подходящий ключ в company_json для {target_key} или {activity_type}. Пропускаем.")
+                    continue
+            company_json[target_key].append(new_activity_obj)
         return company_json
 
-    async def process_all_companies(self, company_id: Optional[str] = None):
-        """Извлекает все компании и создает отдельные json файлы для каждой компании."""
+    async def process_companies_via_deals(self, specific_deal_id: Optional[str] = None):
+        logging.info("Начинаем процесс извлечения компаний через сделки (только со сделками, имеющими telegram_group).")
+        telegram_group_hubspot_field_name = 'telegram_group'
+        deal_properties_to_fetch = [prop_key for prop_key in deal_map.keys() if prop_key.lower() != 'id']
+        if telegram_group_hubspot_field_name not in deal_properties_to_fetch and telegram_group_hubspot_field_name in deal_map:
+            deal_properties_to_fetch.append(telegram_group_hubspot_field_name)
+        unique_deal_properties = list(set(deal_properties_to_fetch))
+        initial_deals_data = []
+        if specific_deal_id:
+            logging.info(f"Запрос данных для конкретной сделки с ID: {specific_deal_id}")
+            initial_deals_data = await self.fetch_all(
+                object_type="deals", properties=unique_deal_properties,
+                associations=["companies"], object_id=specific_deal_id)
+            if not initial_deals_data:
+                logging.warning(f"Сделка с ID {specific_deal_id} не найдена или не удалось получить данные.")
+                return
+            deal_props = initial_deals_data[0].get("properties", {})
+            if not deal_props.get(telegram_group_hubspot_field_name):
+                logging.info(f"Сделка {specific_deal_id} не имеет '{telegram_group_hubspot_field_name}'. Обработка прекращена.")
+                return
+            deals_to_process = initial_deals_data
+        else:
+            logging.info("Запрос всех сделок для фильтрации по telegram_group...")
+            initial_deals_data = await self.fetch_all(
+                object_type="deals", properties=unique_deal_properties, associations=["companies"])
+            if not initial_deals_data:
+                logging.warning("Сделки в HubSpot не найдены.")
+                return
+            deals_to_process = [
+                deal_item for deal_item in initial_deals_data
+                if deal_item.get("properties", {}).get(telegram_group_hubspot_field_name)
+            ]
+            if not deals_to_process:
+                logging.info(f"Не найдено сделок с '{telegram_group_hubspot_field_name}'.")
+                return
 
-        companies = await self.fetch_all(
-            "companies", properties=["name", "description", "domain", "city", "phone", "industry", "state", "id"],
-            company_id=company_id)
-
-        if not companies:
-            logging.warning("Компании в HubSpot не найдены.")
-            return
-
-        logging.info(f"Найдено {len(companies)} компаний. Начинаем обработку...")
-
-        for company in companies:
-            company_id = company["id"]
-
-            # Проверяем, существует ли файл для этой компании
-            try:
-                company_name = company['properties'].get('name', 'Без названия').replace('/', '_').replace('\\', '_')
-            except Exception as e:
-                traceback.print_exc()
-                company_name = company['properties'].get('name', 'Без названия')
-            output_file = os.path.join(self.output_dir, f"{company_name}.json")
-
-            if os.path.exists(output_file):
-                logging.info(f"Файл для компании {company_name} ({company_id}) уже существует. Пропускаем.")
+        logging.info(f"Найдено {len(deals_to_process)} сделок с '{telegram_group_hubspot_field_name}'. Обработка компаний...")
+        processed_company_ids = set()
+        for deal_item in deals_to_process:
+            deal_id_for_log = deal_item.get("id", "Неизвестный ID сделки")
+            company_id = None
+            deal_associations = deal_item.get("associations")
+            if deal_associations and deal_associations.get("companies") and deal_associations["companies"].get("results"):
+                company_assoc_results = deal_associations["companies"]["results"]
+                if company_assoc_results: company_id = company_assoc_results[0].get("id")
+            if not company_id:
+                logging.warning(f"Сделка {deal_id_for_log} (с telegram_group) не имеет связанной компании. Пропускаем.")
                 continue
-
+            if company_id in processed_company_ids:
+                logging.info(f"Компания ID {company_id} (сделка {deal_id_for_log}) уже обработана. Пропускаем.")
+                continue
+            logging.info(f"Обработка компании ID {company_id} (сделка {deal_id_for_log}).")
             company_data = await self.get_company_data(company_id)
-
-            if not company_data:
-                logging.warning(f"Данные для компании с ID {company_id} не найдены. Пропускаем.")
+            if not company_data or not company_data.get("id"):
+                logging.warning(f"Данные для компании ID {company_id} (сделка {deal_id_for_log}) не найдены. Пропускаем.")
                 continue
-
-            # Извлекаем контакты и действия
-            contacts_ids = [i.get('id') for i in
-                            company_data.get("associations", {}).get("contacts", {}).get("results", []) if
-                            i is not None]
-
+            company_name_from_props = company_data.get('properties', {}).get('name', f'Без_названия_{company_id}')
+            company_name_safe = re.sub(r'[<>:"/\\|?*]', '_', company_name_from_props)
+            output_file = os.path.join(self.output_dir, f"{company_name_safe}.json")
+            if os.path.exists(output_file):
+                logging.info(f"Файл для '{company_name_safe}' (ID: {company_id}) уже существует. Пропускаем.")
+                processed_company_ids.add(company_id)
+                continue
+            contact_associations = company_data.get("associations", {}).get("contacts", {}).get("results", [])
+            contacts_ids = [item.get('id') for item in contact_associations if item and item.get('id')]
             contacts = await self.get_associated_contacts(contacts_ids)
-            activities = await self.get_associated_activities(company_data)
-
-            # Создаем JSON структуру для компании
-            company_json = self.build_company_json(company_data, contacts, activities)
-
-            # Сохраняем данные в отдельный JSON файл для каждой компании
+            activities = await self.get_associated_activities(company_data) # Теперь возвращает уникальные активности
+            company_json_output = self.build_company_json(company_data, contacts, activities)
             try:
-                company_name = company_data['properties'].get('name', 'Без названия').replace('/', '_').replace(
-                    '\\', '_')
+                with open(output_file, "w", encoding="utf-8") as f:
+                    json.dump(company_json_output, f, indent=4, ensure_ascii=False)
+                logging.info(f"Данные '{company_name_safe}' (ID: {company_id}) сохранены: {output_file}")
+            except IOError as e:
+                logging.error(f"Ошибка записи {output_file} для '{company_name_safe}': {e}")
             except Exception as e:
-                traceback.print_exc()
-                company_name = company_data['properties'].get('name', 'Без названия')
-            output_file = os.path.join(self.output_dir, f"{company_name}.json")
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(company_json, f, indent=4, ensure_ascii=False)
-
-            logging.info(f"Данные компании {company_name} ({company_id}) успешно сохранены в файл: {output_file}")
-
-        logging.info("Обработка всех компаний завершена.")
+                logging.error(f"Ошибка сохранения файла для '{company_name_safe}': {e}")
+                logging.error(traceback.format_exc())
+            processed_company_ids.add(company_id)
+        logging.info("Обработка компаний (через сделки с telegram_group) завершена.")
 
     async def close(self):
-        await self.client.aclose()
-
+        if self.client and not self.client.is_closed:
+            await self.client.aclose()
 
 if __name__ == "__main__":
     async def main():
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        access_token = config.HUBSPOT_API_KEY  # Замените своим фактическим токеном доступа.
-        output_directory = "111"  # Каталог для хранения файлов компаний
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+        )
+        access_token = None
+        if hasattr(config, 'HUBSPOT_API_KEY') and config.HUBSPOT_API_KEY:
+            access_token = config.HUBSPOT_API_KEY
+        else:
+            logging.error("HUBSPOT_API_KEY не найден в config.py или не задан.")
+            return
+        output_directory = "hubspot_data" # Изменил версию
         extractor = HubSpotDataExtractor(access_token=access_token, output_dir=output_directory)
         try:
-            # Раскомментируйте и укажите ID компании, чтобы обработать только ее
-            company_id_to_process = '19387888471'
-            await extractor.process_all_companies(company_id_to_process)
+            # deal_id_to_process = 'ID_ВАШЕЙ_СДЕЛКИ_ДЛЯ_ТЕСТА'
+            # await extractor.process_companies_via_deals(deal_id_to_process)
+            await extractor.process_companies_via_deals()
         except Exception as e:
-            logging.error(f"Во время обработки произошла ошибка: {e}")
+            logging.error(f"Во время основной обработки произошла критическая ошибка: {e}")
             logging.error(traceback.format_exc())
         finally:
             await extractor.close()
-
-
+            logging.info("Завершение работы скрипта.")
     asyncio.run(main())

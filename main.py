@@ -90,7 +90,7 @@ try:
 except LookupError:
     nltk.download('punkt')
 
-MODEL_NAME = "bigscience/mt0-large"
+MODEL_NAME = "facebook/bart-large-cnn"
 
 def clean_text(text, lang='en'):
     """
@@ -138,7 +138,7 @@ class SummarizerModel:
             raise
 
     # Метод summarize остается без изменений, т.к. он использует self.pipeline
-    def summarize(self, text: str, max_length: int = 1024, min_length: int = 30) -> str:
+    def summarize(self, text: str, question: str= '', max_length: int = 512, min_length: int = 30) -> str:
         # ... (код метода summarize) ...
         if not self.pipeline or not self.tokenizer:
              raise ValueError("Pipeline или токенизатор не загружены.")
@@ -152,16 +152,24 @@ class SummarizerModel:
             # Для mT5 XLSum, фактический лимит может быть ниже, проверим токенизацией
             # Вместо жесткого лимита 512, попробуем положиться на pipeline, но для очень больших текстов все равно нужно чанкование
             # Давайте оставим логику чанкования, но с лимитом токенов токенизатора
-            max_tokens_per_chunk = 1023 # Обычно 512 или 1024
+            max_tokens_per_chunk = max_length # Обычно 512 или 1024
 
             # Токенизация для проверки длины (без паддинга и усечения здесь)
             inputs = self.tokenizer(text, return_tensors=None, truncation=False) # Не тензоры, просто токены
             num_tokens = len(inputs['input_ids'])
             logger.info(f"Количество токенов в тексте: {num_tokens}")
-
             # Если текст не превышает лимит, суммаризируем его напрямую
             if num_tokens <= max_tokens_per_chunk:
                  # Используем pipeline напрямую
+                text = f"""
+**Instruction:** Based *only* on the Original Text below, provide a concise answer to the User Question.
+Your answer should be significantly shortened compared to the relevant sections of the original text, removing filler words, redundancy, and conversational elements not essential for the answer.
+**User Question:** {question}
+**Crucial Constraint:** When forming the answer, you MUST include all specific details (like Dates, Times, Numbers, Proper Nouns, Key Terms) from the text *if they are relevant* to answering the User Question. Discard any information or details from the Original Text that are not relevant to the question.
+**Original Text:**
+{text}
+**Concise, Factual Answer to the Question:** 
+ """
                 summary_result = self.pipeline(text, max_length=max_length, min_length=min_length, truncation=True) # Добавим truncation=True
                 summary = summary_result[0]['summary_text']
                 logger.info(f"Суммирование завершено (один чанк). Длина summary (символы): {len(summary)}")
@@ -185,7 +193,16 @@ class SummarizerModel:
                 if not chunk.strip(): # Пропускаем пустые чанки, если вдруг получились
                     continue
                 # Используем pipeline для каждого чанка
-                chunk_summary_result = self.pipeline(chunk, max_length=max_length, min_length=min_length, truncation=True)
+                text = f"""
+                **Instruction:** Based *only* on the Original Text below, provide a concise answer to the User Question.
+                Your answer should be significantly shortened compared to the relevant sections of the original text, removing filler words, redundancy, and conversational elements not essential for the answer.
+                **User Question:** {question}
+                **Crucial Constraint:** When forming the answer, you MUST include all specific details (like Links, Dates, Times, Numbers, Proper Nouns, Key Terms) from the text *if they are relevant* to answering the User Question. Discard any information or details from the Original Text that are not relevant to the question.
+                **Original Text:**
+                {chunk}
+                **Concise, Factual Answer to the Question:** 
+                 """
+                chunk_summary_result = self.pipeline(text, max_length=max_length, min_length=30, truncation=True)
                 chunk_summary = chunk_summary_result[0]['generated_text']
                 summaries.append(chunk_summary)
                 logger.info(f"Чанк {idx + 1}/{len(chunks_texts)} суммаризован. Длина summary: {len(chunk_summary)}")
@@ -366,9 +383,8 @@ async def summarize_document(doc: str, question: str, model: SummarizerModel) ->
         return "" # Ничего суммировать
 
     try:
-        text = f'Summarizing the text,don\'t cut out dates or other key information, but the main goal is not to shorten, but to leave what is necessary to answer the question:\n{doc} \n\nQuestion: {question}'
         # Запускаем синхронный метод model.summarize в отдельном потоке
-        summary = await asyncio.to_thread(model.summarize, text)
+        summary = await asyncio.to_thread(model.summarize, doc, question)
         return summary
     except Exception as e:
         logger.error(f"Ошибка во время вызова summarize_document: {e}")

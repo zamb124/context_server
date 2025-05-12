@@ -26,6 +26,7 @@ class DocumentType(Enum):
     CALL = 'call'
     MEETING = 'meeting'
     TASK = 'task'
+    DEAL = 'deal'
     NOTE = 'note'
     WIKI = 'wiki'
     STARTREK_TICKET = 'startrek_ticket'

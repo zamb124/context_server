@@ -327,7 +327,7 @@ class HubSpotDataExtractor:
                 if activity_type in company_json: target_key = activity_type
                 else:
                     logging.warning(f"Не удалось найти подходящий ключ в company_json для {target_key} или {activity_type}. Пропускаем.")
-                    continue
+                    #continue
             company_json[target_key].append(new_activity_obj)
         return company_json
 
@@ -350,7 +350,7 @@ class HubSpotDataExtractor:
             deal_props = initial_deals_data[0].get("properties", {})
             if not deal_props.get(telegram_group_hubspot_field_name):
                 logging.info(f"Сделка {specific_deal_id} не имеет '{telegram_group_hubspot_field_name}'. Обработка прекращена.")
-                return
+                #return
             deals_to_process = initial_deals_data
         else:
             logging.info("Запрос всех сделок для фильтрации по telegram_group...")

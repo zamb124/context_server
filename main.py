@@ -443,8 +443,10 @@ async def query_documents(query: Query, request: Request):
     for label in query.labels:
         try:
             collection = get_collection(label.value)
-            transformed_where = transform_where_clause(query.where)
-
+            if not query.where:
+                transformed_where = None
+            else:
+                transformed_where = transform_where_clause(query.where)
             results = collection.query(
                 query_texts=[query.text],
                 n_results=query.n_results,
@@ -468,9 +470,19 @@ async def query_documents(query: Query, request: Request):
                 })
             all_results.extend(extracted_results)
 
+
         except Exception as e:
-            logging.error(f"Ошибка при запросе для label {label.value}: {e}") # Используем label.value
+            logger.error(f"Ошибка в запросе {query}: {e}")
             traceback.print_exc()
+            if 'got {}' in e.args[0]:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"{e}"
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"{e}"
+            )
             # Не прерываем весь запрос, если ошибка с одним лейблом
             # raise HTTPException(status_code=500, detail=f"Ошибка при запросе для label {label.value}: {e}")
 

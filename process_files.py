@@ -157,7 +157,7 @@ def upload_data(item, filename, item_type, source_data):
             data_to_send['text'] += text
 
 
-    url = 'http://localhost:8001/add_document'
+    url = 'https://foodforce.tech/add_document/'
     headers = {'Authorization': f'Bearer {config.CHAT_TOKEN}'}
 
     # Send request with retries
@@ -203,7 +203,7 @@ def main():
 
     logging.info(f"Начинаю основной процесс в каталоге: {directory}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         executor.map(process_file, files)
 
     logging.info("Основной процесс завершен.")
